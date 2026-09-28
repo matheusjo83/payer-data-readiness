@@ -17,6 +17,11 @@ union all
 select 'claims_paid_exceeds_charged', count(*) filter (where paid_exceeds_charged), count(*)
 from {{ ref('fct_claims') }}
 union all
+select 'claims_outside_eligibility',
+       count(*) filter (where not is_within_eligibility),
+       count(*) filter (where has_known_member)
+from {{ ref('fct_claims') }}
+union all
 select 'orphan_claim_lines',
        count(*) filter (where c.claim_id is null),
        count(*)

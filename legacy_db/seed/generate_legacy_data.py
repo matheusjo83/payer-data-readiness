@@ -8,13 +8,17 @@ Usage:
 """
 
 import argparse
+import os
 import random
 import time
 from datetime import date, datetime, timedelta
 
 import psycopg
 
-PG_DSN = "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
+# Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
+PG_DSN = os.environ.get(
+    "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
+)
 
 # Injected issue rates (documented so results can be compared with what the
 # quality layer detects).
@@ -24,6 +28,7 @@ RATE_INVALID_DOB = 0.010
 RATE_CLAIM_UNKNOWN_MEMBER = 0.010
 RATE_PAID_GT_CHARGED = 0.020
 RATE_ORPHAN_LINE = 0.005
+RATE_CLAIM_OUTSIDE_ELIGIBILITY = 0.010
 
 FIRST = ["James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael",
          "Linda", "David", "Elizabeth", "Maria", "Jose", "Wei", "Aisha", "Carlos"]
@@ -106,12 +111,13 @@ def main() -> None:
             members.append(tuple(dup))
 
     # Eligibility spans
-    elig = []
+    elig, coverage = [], {}
     for mid in member_ids:
         pid = random.choice(PLANS)[0]
         eff = rand_date(date(2021, 1, 1), date(2025, 12, 31))
         term = "99991231" if random.random() < 0.8 else ymd(rand_date(eff, today))
         elig.append((mid, pid, ymd(eff), term, now))
+        coverage[mid] = (eff, None if term == "99991231" else datetime.strptime(term, "%Y%m%d").date())
 
     # Providers
     providers = []
@@ -122,13 +128,21 @@ def main() -> None:
     provider_ids = [p[0] for p in providers]
 
     # Claims + lines
+    # Service dates fall inside the member's coverage, except for the injected
+    # claims outside eligibility (1-60 days before coverage starts).
+    claim_window = (date(2024, 1, 1), today - timedelta(days=5))
+    covered_ids = [mid for mid, (eff, term) in coverage.items()
+                   if eff <= claim_window[1] and (term is None or term >= claim_window[0])]
     claims, lines = [], []
     for i in range(args.claims):
         cid = f"C{i + 1:012d}"
-        mid = random.choice(member_ids)
+        mid = random.choice(covered_ids)
+        eff, term = coverage[mid]
+        svc = rand_date(max(eff, claim_window[0]), min(term or claim_window[1], claim_window[1]))
+        if random.random() < RATE_CLAIM_OUTSIDE_ELIGIBILITY:
+            svc = eff - timedelta(days=random.randint(1, 60))
         if random.random() < RATE_CLAIM_UNKNOWN_MEMBER:
             mid = f"M{random.randint(900000000, 999999999)}"
-        svc = rand_date(date(2024, 1, 1), today - timedelta(days=5))
         rcvd = svc + timedelta(days=random.randint(1, 30))
         status = random.choices(["PD", "DN", "PN", "VD"], [80, 10, 7, 3])[0]
         adj = "" if status == "PN" else ymd(rcvd + timedelta(days=random.randint(1, 20)))

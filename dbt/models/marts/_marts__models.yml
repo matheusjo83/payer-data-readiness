@@ -2,23 +2,236 @@ version: 2
 
 models:
   - name: fct_claims
-    description: Claims with aggregated lines and integrity flags (gold).
+    description: >
+      Claims with aggregated lines and integrity flags (gold). One row per claim header;
+      header columns are documented in stg_legacy__claims.
     columns:
       - name: claim_id
+        description: "{{ doc('claim_id') }}"
         data_tests: [unique, not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+      - name: claim_type
+        description: professional, institutional or pharmacy.
+      - name: service_from_date
+        description: First date of service.
+      - name: service_to_date
+        description: Last date of service.
+      - name: received_date
+        description: Date the payer received the claim.
+      - name: adjudicated_date
+        description: Date the claim was adjudicated. Null while pending.
+      - name: claim_status
+        description: paid, denied, pending or void.
+      - name: total_charged
+        description: Total billed amount (header).
+      - name: total_paid
+        description: Total paid amount (header).
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
+      - name: line_count
+        description: Number of claim lines (0 when the claim has no lines).
+      - name: lines_charged
+        description: Sum of line charged amounts.
+      - name: lines_paid
+        description: Sum of line paid amounts.
+      - name: has_known_member
+        description: True when member_id exists in the member master.
+      - name: plan_id
+        description: Plan of the coverage span in effect on the service date. Null when there is none.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_plan')
+                field: plan_id
+      - name: is_within_eligibility
+        description: >
+          True when the service date falls inside one of the member's coverage spans.
+          Null for claims whose member is unknown.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+              config: {severity: warn}   # claims outside coverage exist in the legacy source
+      - name: paid_exceeds_charged
+        description: True when the header paid amount is greater than the charged amount.
+      - name: days_to_adjudicate
+        description: Days from receipt to adjudication.
+
   - name: fct_prior_auth_timeliness
     description: Prior authorization decision time vs. CMS-0057-F timeframes.
     columns:
       - name: prior_auth_id
+        description: "{{ doc('prior_auth_id') }}"
         data_tests: [unique, not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+      - name: is_expedited
+        description: True for expedited requests (72-hour timeframe), false for standard (7 days).
+      - name: requested_at
+        description: Time the request was received.
+      - name: decided_at
+        description: Time of the decision. Null while pending.
+      - name: decision
+        description: approved, denied or pending.
+      - name: timeframe_hours
+        description: Applicable CMS-0057-F timeframe in hours (72 or 168).
+      - name: decision_hours
+        description: Hours from request to decision. Null while pending.
+      - name: within_timeframe
+        description: True when decided within the timeframe. Null while pending.
+
+  - name: fct_member_months
+    description: >
+      One row per member and calendar month of coverage, up to the current month.
+      Standard denominator for utilization and cost metrics (e.g. claims per 1,000 member months).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: ['member_id', 'coverage_month']
+    columns:
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_member')
+                field: member_id
+      - name: plan_id
+        description: "{{ doc('plan_id') }}"
+        data_tests: [not_null]
+      - name: line_of_business
+        description: "{{ doc('line_of_business') }}"
+      - name: coverage_month
+        description: First day of the covered calendar month.
+        data_tests: [not_null]
+
+  - name: dim_member
+    description: Deduplicated members with their most recent coverage span and plan.
+    columns:
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests: [unique, not_null]
+      - name: first_name
+        description: First name.
+      - name: last_name
+        description: Last name.
+      - name: birth_date
+        description: Date of birth. Null when the legacy value cannot be parsed.
+      - name: gender
+        description: Standardized gender (male, female, unknown, invalid).
+      - name: zip_code
+        description: ZIP code.
+      - name: state
+        description: Two-letter state code.
+      - name: had_duplicates
+        description: True when the legacy member master had more than one row for this member.
+      - name: current_plan_id
+        description: Plan of the member's most recent coverage span.
+      - name: current_line_of_business
+        description: "{{ doc('line_of_business') }}"
+      - name: coverage_start_date
+        description: "{{ doc('coverage_start_date') }}"
+      - name: coverage_end_date
+        description: "{{ doc('coverage_end_date') }}"
+      - name: is_currently_covered
+        description: True when the most recent coverage span includes today.
+        data_tests: [not_null]
+
+  - name: dim_plan
+    description: Health plans (gold).
+    columns:
+      - name: plan_id
+        description: "{{ doc('plan_id') }}"
+        data_tests: [unique, not_null]
+      - name: plan_name
+        description: Plan name.
+      - name: line_of_business
+        description: "{{ doc('line_of_business') }}"
+      - name: effective_date
+        description: Date the plan became available.
+      - name: termination_date
+        description: Date the plan was discontinued. Null when still active.
+
+  - name: dim_provider
+    description: Providers (gold).
+    columns:
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+        data_tests: [unique, not_null]
+      - name: npi
+        description: National Provider Identifier.
+      - name: npi_format_valid
+        description: True when the NPI has exactly 10 digits (check digit not validated).
+      - name: provider_name
+        description: Provider or clinic name.
+      - name: specialty
+        description: Decoded specialty.
+      - name: state
+        description: Two-letter state code.
+
   - name: dq_issue_summary
-    description: Data-quality scorecard of known legacy issues detected by the pipeline.
+    description: >
+      Data-quality scorecard of known legacy issues detected by the pipeline.
+      Compare with the injection rates in legacy_db/seed/generate_legacy_data.py.
+    columns:
+      - name: check_name
+        description: Name of the data-quality check.
+        data_tests: [unique, not_null]
+      - name: issue_count
+        description: Records that fail the check.
+      - name: population
+        description: Records the check was applied to.
+
   - name: load_reliability
-    description: Load success rate, volume and duration per source.
+    description: Load success rate, volume and duration per source, from bronze._load_log.
+    columns:
+      - name: source
+        description: Loaded source, named <system>.<load type>.<table> (e.g. legacy.cdc.clm_hdr).
+        data_tests: [unique, not_null]
+      - name: runs
+        description: Number of recorded load steps.
+      - name: successful_runs
+        description: Load steps with status success.
+      - name: success_rate_pct
+        description: Share of successful load steps, in percent.
+      - name: total_rows
+        description: Sum of rows written across load steps.
+      - name: last_max_rows
+        description: Largest row count of a single load step.
+      - name: avg_seconds
+        description: Average duration of a load step, in seconds.
+      - name: last_load_at
+        description: End time of the most recent load step.
+
   - name: cdc_latency
     description: >
       Source-to-lakehouse latency of CDC changes per legacy table
       (commit in Postgres to arrival in bronze), with change volume by operation.
     columns:
       - name: source_table
+        description: Legacy table name.
         data_tests: [unique, not_null]
+      - name: changes
+        description: Captured changes (snapshot rows excluded).
+      - name: inserts
+        description: Captured inserts.
+      - name: updates
+        description: Captured updates.
+      - name: deletes
+        description: Captured deletes.
+      - name: truncates
+        description: Captured truncates.
+      - name: p50_latency_seconds
+        description: Median latency, in seconds.
+      - name: p95_latency_seconds
+        description: 95th percentile latency, in seconds.
+      - name: max_latency_seconds
+        description: Maximum latency, in seconds.
+      - name: last_commit_at
+        description: Commit time of the most recent captured change.
+      - name: last_loaded_at
+        description: Arrival time of the most recent captured change.

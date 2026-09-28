@@ -1,15 +1,15 @@
 PY ?= python
 
-.PHONY: up down reset seed synthea ingest cdc changes dbt docs all
+.PHONY: up down reset seed synthea ingest cdc changes dbt coverage docs airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
 
-down:      ## Stop containers
-	docker compose down
+down:      ## Stop containers (including Airflow)
+	docker compose --profile airflow down
 
 reset:     ## Stop containers and delete all local data
-	docker compose down -v
+	docker compose --profile airflow down -v
 	rm -rf data/
 
 seed:      ## Generate synthetic legacy payer data (with deliberate quality issues)
@@ -30,6 +30,16 @@ changes:   ## Simulate activity in the legacy database (300 events over 60 secon
 
 dbt:       ## Build silver and gold layers and run data tests
 	cd dbt && dbt build --profiles-dir .
+
+coverage:  ## Documentation and test coverage of the dbt models (writes dbt/target/coverage.json)
+	cd dbt && dbt docs generate --profiles-dir .
+	$(PY) scripts/dbt_coverage.py
+
+airflow-up:   ## Build and start Airflow (UI at http://localhost:8080)
+	AIRFLOW_UID=$$(id -u) docker compose --profile airflow up -d --build airflow
+
+airflow-down: ## Stop Airflow (the legacy database keeps running)
+	docker compose --profile airflow stop airflow airflow-db
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .
