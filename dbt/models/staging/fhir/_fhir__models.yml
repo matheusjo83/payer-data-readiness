@@ -2,17 +2,49 @@ version: 2
 
 models:
   - name: stg_fhir__patients
+    description: >
+      Hand-written flattening of FHIR Patient resources from Synthea. Phase 4 compares it
+      with the equivalent SQL on FHIR ViewDefinition.
     columns:
       - name: patient_id
+        description: FHIR Patient.id.
         data_tests: [unique, not_null]
       - name: gender
+        description: FHIR administrative gender (male, female, other, unknown).
         data_tests:
           - accepted_values:
               arguments:
                 values: ['male', 'female', 'other', 'unknown']
+      - name: birth_date
+        description: Patient.birthDate.
+      - name: state
+        description: State of the first address.
+      - name: postal_code
+        description: Postal code of the first address.
+      - name: _loaded_at
+        description: "{{ doc('fhir_loaded_at') }}"
+
   - name: stg_fhir__claims
+    description: Hand-written flattening of FHIR Claim resources from Synthea.
     columns:
       - name: claim_id
+        description: FHIR Claim.id.
         data_tests: [unique, not_null]
       - name: patient_ref
-        data_tests: [not_null]
+        description: Patient id referenced by Claim.patient (reference prefix removed).
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_fhir__patients')
+                field: patient_id
+      - name: status
+        description: Claim.status.
+      - name: claim_type
+        description: First coding of Claim.type (e.g. professional, institutional, pharmacy).
+      - name: billable_start
+        description: Start of Claim.billablePeriod.
+      - name: total_value
+        description: Claim.total.value.
+      - name: _loaded_at
+        description: "{{ doc('fhir_loaded_at') }}"

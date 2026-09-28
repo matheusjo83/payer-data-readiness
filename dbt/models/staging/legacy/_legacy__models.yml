@@ -5,39 +5,83 @@ models:
     description: Deduplicated members with parsed dates and standardized gender.
     columns:
       - name: member_id
+        description: "{{ doc('member_id') }} Unique here: the most recent version of each member is kept."
         data_tests: [unique, not_null]
+      - name: first_name
+        description: First name, trimmed.
+      - name: last_name
+        description: Last name, trimmed.
+      - name: birth_date
+        description: Date of birth. Null when the legacy value cannot be parsed.
+        data_tests:
+          - not_null:
+              config: {severity: warn}   # unparseable legacy dates become null
       - name: gender
+        description: Standardized gender (male, female, unknown); 'invalid' for codes outside M/F/U.
         data_tests:
           - accepted_values:
               arguments:
                 values: ['male', 'female', 'unknown']
               config: {severity: warn}   # 'invalid' is expected from the legacy source
-      - name: birth_date
-        data_tests:
-          - not_null:
-              config: {severity: warn}   # unparseable legacy dates become null
+      - name: zip_code
+        description: ZIP code, trimmed.
+      - name: state
+        description: Two-letter state code.
+      - name: had_duplicates
+        description: True when the legacy member master had more than one row for this member.
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
 
   - name: stg_legacy__claims
+    description: Claim headers with decoded codes and parsed dates.
     columns:
       - name: claim_id
+        description: "{{ doc('claim_id') }}"
         data_tests: [unique, not_null]
-      - name: claim_status
-        data_tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['paid', 'denied', 'pending', 'void']
       - name: member_id
+        description: "{{ doc('member_id') }}"
         data_tests:
           - relationships:
               arguments:
                 to: ref('stg_legacy__members')
                 field: member_id
               config: {severity: warn}   # known referential gaps in the legacy source
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+      - name: claim_type
+        description: professional, institutional or pharmacy.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['professional', 'institutional', 'pharmacy']
+      - name: service_from_date
+        description: First date of service.
+        data_tests: [not_null]
+      - name: service_to_date
+        description: Last date of service.
+      - name: received_date
+        description: Date the payer received the claim.
+      - name: adjudicated_date
+        description: Date the claim was adjudicated. Null while pending.
+      - name: claim_status
+        description: paid, denied, pending or void.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['paid', 'denied', 'pending', 'void']
+      - name: total_charged
+        description: Total billed amount (header).
+      - name: total_paid
+        description: Total paid amount (header).
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
 
   - name: stg_legacy__claim_lines
+    description: Claim lines (service level). The legacy source has no foreign key to the header.
     columns:
       - name: claim_id
+        description: "{{ doc('claim_id') }}"
         data_tests:
           - not_null
           - relationships:
@@ -45,13 +89,126 @@ models:
                 to: ref('stg_legacy__claims')
                 field: claim_id
               config: {severity: warn}   # orphan lines exist in the legacy source
+      - name: line_number
+        description: Line number within the claim.
+        data_tests: [not_null]
+      - name: procedure_code
+        description: Procedure code (CPT/HCPCS).
+      - name: diagnosis_code
+        description: Diagnosis code (ICD-10-CM).
+      - name: units
+        description: Units of service.
+      - name: charged_amount
+        description: Billed amount for the line.
+      - name: paid_amount
+        description: Paid amount for the line.
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
 
   - name: stg_legacy__prior_auths
+    description: Prior authorization requests and decisions.
     columns:
       - name: prior_auth_id
+        description: "{{ doc('prior_auth_id') }}"
         data_tests: [unique, not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+      - name: service_code
+        description: Requested service (procedure code).
+      - name: is_expedited
+        description: True for expedited (urgent) requests, false for standard requests.
+        data_tests: [not_null]
+      - name: requested_at
+        description: Time the request was received.
+        data_tests: [not_null]
+      - name: decided_at
+        description: Time of the decision. Null while pending.
       - name: decision
+        description: approved, denied or pending.
         data_tests:
           - accepted_values:
               arguments:
                 values: ['approved', 'denied', 'pending']
+
+  - name: stg_legacy__eligibility
+    description: Member coverage spans (which plan covered a member, and when).
+    columns:
+      - name: eligibility_id
+        description: Legacy surrogate key of the coverage span (`elig_sk`).
+        data_tests: [unique, not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_legacy__members')
+                field: member_id
+      - name: plan_id
+        description: "{{ doc('plan_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_legacy__plans')
+                field: plan_id
+      - name: coverage_start_date
+        description: "{{ doc('coverage_start_date') }}"
+        data_tests: [not_null]
+      - name: coverage_end_date
+        description: "{{ doc('coverage_end_date') }}"
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
+
+  - name: stg_legacy__plans
+    description: Health plans (products) with decoded line of business.
+    columns:
+      - name: plan_id
+        description: "{{ doc('plan_id') }}"
+        data_tests: [unique, not_null]
+      - name: plan_name
+        description: Plan name.
+      - name: line_of_business
+        description: "{{ doc('line_of_business') }}"
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['commercial', 'medicare_advantage', 'medicaid', 'chip']
+      - name: effective_date
+        description: Date the plan became available.
+      - name: termination_date
+        description: Date the plan was discontinued. Null when still active.
+
+  - name: stg_legacy__providers
+    description: Providers with decoded specialty.
+    columns:
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+        data_tests: [unique, not_null]
+      - name: npi
+        description: National Provider Identifier.
+        data_tests: [unique, not_null]
+      - name: npi_format_valid
+        description: >
+          True when the NPI has exactly 10 digits. The check digit is not validated,
+          because the synthetic generator does not produce valid check digits.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+              config: {severity: warn}
+      - name: provider_name
+        description: Provider or clinic name.
+      - name: specialty
+        description: Decoded specialty.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['family_medicine', 'internal_medicine', 'pediatrics', 'cardiology',
+                         'orthopedics', 'radiology', 'emergency_medicine', 'obstetrics_gynecology']
+      - name: state
+        description: Two-letter state code.

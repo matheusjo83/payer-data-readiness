@@ -6,7 +6,7 @@ change data capture sees a realistic stream of inserts, updates and deletes:
     decide_prior_auth   pending prior authorization gets approved or denied
     new_prior_auth      new prior authorization request (pending)
     adjudicate_claim    pending claim becomes paid or denied (header + lines)
-    new_claim           new claim with 1-4 lines
+    new_claim           new claim with 1-4 lines (member with active coverage)
     move_member         member changes address (zip code)
     purge_void_claim    voided claim is deleted (header + lines)
 
@@ -15,13 +15,17 @@ Usage:
 """
 
 import argparse
+import os
 import random
 import time
 from datetime import datetime, timedelta
 
 import psycopg
 
-PG_DSN = "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
+# Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
+PG_DSN = os.environ.get(
+    "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
+)
 
 EVENT_WEIGHTS = {
     "decide_prior_auth": 25,
@@ -46,6 +50,16 @@ class Simulator:
         self.conn = conn
         cur = conn.cursor()
         self.member_ids = [r[0] for r in cur.execute("SELECT DISTINCT mbr_id FROM mbr_mstr")]
+        # New claims only for members with coverage today: {mbr_id: coverage start}.
+        today = ymd(datetime.now())
+        self.active_coverage = {
+            mbr_id: datetime.strptime(eff_dt, "%Y%m%d").date()
+            for mbr_id, eff_dt in cur.execute(
+                "SELECT mbr_id, max(eff_dt) FROM elig_span WHERE eff_dt <= %s AND term_dt >= %s "
+                "GROUP BY mbr_id",
+                [today, today],
+            )
+        }
         self.provider_ids = [r[0] for r in cur.execute("SELECT prv_id FROM prv")]
         # New IDs continue the generator's sequences (orphan lines use the 'C9' range).
         self.next_claim = cur.execute(
@@ -103,13 +117,14 @@ class Simulator:
     def new_claim(self, cur, now) -> bool:
         clm_id = f"C{self.next_claim:012d}"
         self.next_claim += 1
-        svc = now.date() - timedelta(days=random.randint(1, 30))
+        mbr_id = random.choice(list(self.active_coverage))
+        svc = max(self.active_coverage[mbr_id], now.date() - timedelta(days=random.randint(1, 30)))
         charges = [round(random.uniform(40, 1500), 2) for _ in range(random.randint(1, 4))]
         cur.execute(
             "INSERT INTO clm_hdr (clm_id, mbr_id, prv_id, clm_typ_cd, svc_from_dt, svc_to_dt, rcvd_dt, "
             "adj_dt, clm_stat_cd, tot_chrg_amt, tot_pd_amt, upd_ts) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, '', 'PN', %s, 0, %s)",
-            [clm_id, random.choice(self.member_ids), random.choice(self.provider_ids),
+            [clm_id, mbr_id, random.choice(self.provider_ids),
              random.choices(["P", "I", "R"], [70, 20, 10])[0], ymd(svc), ymd(svc), ymd(now),
              round(sum(charges), 2), now],
         )

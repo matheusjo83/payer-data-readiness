@@ -28,5 +28,55 @@ services:
       timeout: 5s
       retries: 10
 
+  # Orchestration (optional): docker compose --profile airflow up -d
+  airflow-db:
+    profiles: [airflow]
+    image: postgres:16
+    container_name: payer-airflow-db
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow:
+    profiles: [airflow]
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: payer-airflow:3.3.2
+    container_name: payer-airflow
+    # Run as the host user so files written to ./data and ./dbt keep their owner.
+    user: "${AIRFLOW_UID:-1000}:0"
+    depends_on:
+      airflow-db: {condition: service_healthy}
+      legacy-db: {condition: service_healthy}
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      # Local development only: every user is an admin, no login screen.
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+      LEGACY_PG_DSN: host=legacy-db port=5432 dbname=payer_legacy user=legacy password=legacy
+    volumes:
+      - .:/opt/project
+    ports:
+      - "8080:8080"
+    command:
+      - bash
+      - -c
+      - >-
+        airflow db migrate
+        && airflow pools set lakehouse 1 "DuckDB lakehouse: single writer"
+        && exec airflow standalone
+
 volumes:
   legacy_data:
+  airflow_data:

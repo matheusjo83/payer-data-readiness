@@ -28,19 +28,24 @@ Synthea (synthetic FHIR R4) ──── NDJSON load ──┐
                                                ├─► Bronze ─► Silver ─► Gold ─► SQL on FHIR views
 Legacy payer DB (Postgres) ──── CDC (WAL) ─────┘   (raw)    (tested)  (models)  Quality & lineage
                                 (logged)
+          └──────────── orchestrated by Airflow (CDC sync, FHIR load, dbt build, coverage) ─────┘
 ```
 
 | Layer  | Location (DuckDB)         | Contents                                                 |
 |--------|---------------------------|----------------------------------------------------------|
 | Bronze | `bronze.*`                | Legacy change tables (CDC), raw FHIR JSON, load log      |
-| Silver | `silver.*` (dbt staging)  | Deduplicated, typed, standardized and tested data        |
-| Gold   | `gold.*` (dbt marts)      | Business models, quality scorecard, reliability metrics  |
+| Silver | `silver.*` (dbt staging)  | Current state of each source: deduplicated, typed, tested |
+| Gold   | `gold.*` (dbt marts)      | Dimensions, facts, quality scorecard, reliability metrics |
+
+Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_member_months`,
+`fct_prior_auth_timeliness`, plus the quality and reliability models `dq_issue_summary`,
+`load_reliability` and `cdc_latency`.
 
 ## Stack
 
 Runs fully local, at zero cost: **Postgres** (legacy source, Docker, with the **wal2json** logical
 decoding plugin for CDC), **DuckDB** (lakehouse engine), **dbt** (transformations, tests, lineage),
-**Synthea** (synthetic FHIR data), **Python** (ingestion).
+**Synthea** (synthetic FHIR data), **Python** (ingestion), **Apache Airflow** (orchestration, Docker).
 
 ## Quickstart
 
@@ -55,6 +60,7 @@ make seed      # generate legacy data with deliberate quality issues
 make synthea   # generate synthetic FHIR R4 data (bulk NDJSON)
 make ingest    # CDC snapshot of the legacy tables + FHIR load into the bronze layer
 make dbt       # build silver/gold layers and run data tests
+make coverage  # documentation and test coverage of the dbt models
 make docs      # browse models and the lineage graph
 ```
 
@@ -79,7 +85,8 @@ legacy source. The `gold.dq_issue_summary` model counts them.
 `legacy_db/init/01_schema.sql` reproduces typical legacy traits: cryptic names, dates stored as
 `VARCHAR(8)`, single-character codes and no foreign keys. The generator injects known issues at
 documented rates (duplicate members, invalid gender codes, unparseable birth dates, claims for
-unknown members, paid amounts above charges, orphan claim lines), so detection can be verified.
+unknown members, paid amounts above charges, orphan claim lines, claims with a service date
+outside the member's coverage), so detection can be verified.
 
 `legacy_db/seed/simulate_changes.py` generates day-to-day activity, one transaction per event:
 prior authorization decisions and new requests, claim adjudication, new claims, member address
@@ -95,36 +102,67 @@ replication slot (wal2json). It does not change the legacy tables and it capture
   the copied rows; each change carries the full new row, so the final state is the same.
 - **Bronze change tables.** Each legacy table has an append-only `bronze.legacy_<table>_changes`
   table: one row per change (`_op` = S snapshot, I insert, U update, D delete, T truncate), with the
-  log position (`_lsn`), the source commit time (`_commit_ts`) and the arrival time (`_loaded_at`).
+  log position (`_lsn`, plus `_seq` for rows that a bulk write such as `COPY` puts in one WAL record),
+  the source commit time (`_commit_ts`) and the arrival time (`_loaded_at`).
 - **No lost or repeated batches.** Changes are read without being consumed (`peek`), written to
   DuckDB in one transaction together with the last commit LSN (`bronze._cdc_state`), and only then
   released from the slot (`advance`). If the loader stops between the two steps, the next run skips
-  the batch that was already stored. A dbt test checks that no change LSN appears twice.
+  the batch that was already stored. A dbt test checks that no log position (`_lsn`, `_seq`) appears
+  twice.
 - **Current state.** Silver models rebuild each table's current state with the
   `legacy_current_state` macro: the latest version of each primary key after the last TRUNCATE,
-  without deleted keys. Gold models did not change.
+  without deleted keys. Rows that share an `_lsn` are ordered by `_seq`.
 - **Operational note.** A replication slot makes Postgres keep WAL until it is consumed. If the
   loader is stopped for a long time, run `python ingestion/cdc_legacy.py drop-slot`; the next
   `make ingest` takes a new snapshot.
+
+## Orchestration
+
+`airflow/dags/payer_lakehouse.py` defines two DAGs, run by Airflow 3 in Docker
+(`make airflow-up`, UI at http://localhost:8080, no login in this local setup):
+
+| DAG                      | Schedule          | Tasks                                                   |
+|--------------------------|-------------------|---------------------------------------------------------|
+| `legacy_cdc_refresh`     | every 30 minutes  | `cdc_sync` → `dbt_build`                                |
+| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `dbt_build` → `dbt_coverage` |
+
+Both DAGs start paused. Design choices:
+
+- **Airflow only orchestrates.** Tasks call the same scripts and `dbt build` used by `make`,
+  through `BashOperator`. The loaders and dbt run in their own virtualenv inside the image, so
+  their dependencies never conflict with Airflow's. Versions are pinned in `requirements.txt`,
+  because the host and the container write the same DuckDB file.
+- **One writer at a time.** Every task runs in the `lakehouse` pool, which has one slot: tasks
+  from both DAGs wait for each other instead of failing on a locked DuckDB file. Do not run the
+  `make` targets that write to the lakehouse while Airflow is running tasks.
+- **Failure policy.** Each task retries twice. Data tests configured as warnings (known legacy
+  issues) do not fail `dbt_build`; test errors do.
+- **Local setup.** `airflow standalone` with the LocalExecutor and a separate Postgres for Airflow
+  metadata. A production deployment would run the scheduler, API server and workers as separate
+  services with real authentication.
 
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
 |----------------------------------------|-----------------------------------------|-------------|
 | Load success rate, volume and duration | `gold.load_reliability`                 | Phase 1, 2  |
-| Known data-quality issues detected     | `gold.dq_issue_summary`                 | Phase 1     |
+| Known data-quality issues detected     | `gold.dq_issue_summary`                 | Phase 1, 3  |
 | Prior authorization decision timeliness| `gold.fct_prior_auth_timeliness`        | Phase 1     |
 | Source-to-lakehouse latency (CDC)      | `gold.cdc_latency`                      | Phase 2     |
-| Test coverage and documented lineage   | dbt artifacts                           | Phase 3     |
+| Test coverage and documented lineage   | `make coverage` (dbt artifacts)         | Phase 3     |
 | FHIR view parity (hand-written vs. ViewDefinition) | `fhir/view_definitions/`    | Phase 4     |
 
 ## Results
 
-First end-to-end run of Phase 1 (2026-09-28). All figures below come from synthetic data:
-the legacy source was generated by `legacy_db/seed/generate_legacy_data.py` with its default
-fixed seed (42) and Synthea was run with seed 42 (population 500). They describe how the
-pipeline behaves on that data, not the performance of any real payer. Running the Quickstart
-commands produces them again; see the reproducibility note at the end of this section.
+Figures from 2026-09-28. All figures below come from synthetic data: the legacy source was
+generated by `legacy_db/seed/generate_legacy_data.py` with its default fixed seed (42) and
+Synthea was run with seed 42 (population 500). They describe how the pipeline behaves on that
+data, not the performance of any real payer. Running the Quickstart commands produces them
+again; see the reproducibility note at the end of this section.
+
+In Phase 3 the generator changed: claims now fall inside the member's coverage, except for the
+injected claims outside eligibility. This changed the random sequence, so the claim and prior
+authorization figures differ from the ones published in Phase 1 (see the git history).
 
 ### Data quality
 
@@ -136,26 +174,28 @@ from 5,094 source rows).
 | Duplicate member IDs         |       94 | 5,000 members   |      1.88% | 1.5% of members             |
 | Invalid gender code          |       51 | 5,000 members   |      1.02% | 1.0% of members             |
 | Unparseable birth date       |       44 | 5,000 members   |      0.88% | 1.0% of members             |
-| Claims with unknown member   |      251 | 25,000 claims   |      1.00% | 1.0% of claims              |
-| Paid amount exceeds charged  |      407 | 25,000 claims   |      1.63% | 2.0% of paid claims         |
-| Orphan claim lines           |      312 | 62,797 lines    |      0.50% | 0.5% of lines               |
+| Claims with unknown member   |      242 | 25,000 claims   |      0.97% | 1.0% of claims              |
+| Paid amount exceeds charged  |      405 | 25,000 claims   |      1.62% | 2.0% of paid claims         |
+| Claims outside eligibility   |      251 | 24,758 claims   |      1.01% | 1.0% of claims              |
+| Orphan claim lines           |      312 | 62,795 lines    |      0.50% | 0.5% of lines               |
 
 Injection rates are probabilities, so observed counts differ from the nominal rate by random
-variation. The paid-exceeds-charged rate applies only to paid claims: 407 of 19,901 paid
-claims (2.05%).
+variation. The paid-exceeds-charged rate applies only to paid claims: 405 of 20,173 paid
+claims (2.01%). The outside-eligibility check applies only to claims whose member exists
+(24,758), because claims with an unknown member have no coverage to compare with.
 
 **Traceability of injected issues.** For two checks, the injected records can be identified
 in bronze independently of the dbt models, because the generator assigns them IDs outside the
 valid ranges:
 
-- *Orphan claim lines:* the generator adds `int(62,485 × 0.005) = 312` lines whose claim IDs
+- *Orphan claim lines:* the generator adds `int(62,483 × 0.005) = 312` lines whose claim IDs
   start with `C9`, which never matches a real header. The check flagged 312 lines, all 312 of
   them injected (312/312, no other lines flagged).
 - *Claims with unknown member:* injected claims reference member IDs from `M900000000` up,
-  while real members run from `M000000001` to `M000005000`. Bronze has 251 such claims (1.00%
-  of 25,000, against a nominal 1.0%). The check flagged 251 claims, all 251 of them injected.
+  while real members run from `M000000001` to `M000005000`. Bronze has 242 such claims (0.97%
+  of 25,000, against a nominal 1.0%). The check flagged 242 claims, all 242 of them injected.
 
-The other four checks have no independent ground truth in the data, so only their counts are
+The other five checks have no independent ground truth in the data, so only their counts are
 reported.
 
 ### Prior authorization timeliness
@@ -165,8 +205,8 @@ requests have no decision timestamp and are left out of the timing figures.
 
 | Request type | Requests | Decided | Pending | Mean decision time | Median decision time | Timeframe       | Within timeframe       |
 |--------------|---------:|--------:|--------:|-------------------:|---------------------:|-----------------|------------------------|
-| Expedited    |      645 |     604 |      41 |             30.3 h |               20.1 h | 72 h            | 555 of 604 (91.9%)     |
-| Standard     |    2,355 |   2,262 |      93 |             86.7 h |               61.1 h | 168 h (7 days)  | 1,949 of 2,262 (86.2%) |
+| Expedited    |      638 |     612 |      26 |             30.8 h |               21.1 h | 72 h            | 557 of 612 (91.0%)     |
+| Standard     |    2,362 |   2,241 |     121 |             85.9 h |               59.9 h | 168 h (7 days)  | 1,927 of 2,241 (86.0%) |
 
 The generator draws decision times from exponential distributions (means of 30 h for
 expedited and 90 h for standard requests). These figures show that the model computes the
@@ -174,16 +214,17 @@ metric correctly; they say nothing about how any real organization performs.
 
 ### Bronze load reliability
 
-From `gold.load_reliability` (backed by `bronze._load_log`).
+From `bronze._load_log` (the source of `gold.load_reliability`), for the loads of a Quickstart
+run: the CDC snapshot of the legacy tables and the FHIR load.
 
-| Source            | Loads | Successful | Rows loaded | Total load time |
-|-------------------|------:|-----------:|------------:|----------------:|
-| Legacy (Postgres) |     7 |          7 |     101,196 |          0.17 s |
-| Synthea (FHIR)    |    20 |         20 |     589,293 |          3.94 s |
-| **Total**         |    27 |         27 |     690,489 |          4.11 s |
+| Source                          | Loads | Successful | Rows loaded | Total load time |
+|---------------------------------|------:|-----------:|------------:|----------------:|
+| Legacy (Postgres, CDC snapshot) |     7 |          7 |     101,194 |          0.18 s |
+| Synthea (FHIR)                  |    20 |         20 |     589,293 |          5.14 s |
+| **Total**                       |    27 |         27 |     690,487 |          5.32 s |
 
 Each table and resource type was loaded once, so the 100% success rate comes from a single run
-and does not yet show a trend. The largest load was `Observation` (224,817 resources, 0.76 s).
+and does not yet show a trend. The largest load was `Observation` (224,817 resources).
 
 ### Change data capture latency (Phase 2)
 
@@ -207,6 +248,22 @@ tables matched the Postgres tables row for row in all seven tables.
 Both processes ran on the same machine, so the source and lakehouse clocks agree; with separate
 hosts, clock skew would add to the measured latency.
 
+### Documentation and test coverage (Phase 3)
+
+From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
+columns that exist in the database).
+
+| Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
+|--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
+| Silver |      9 |              100% |              100% |      67 |               100% |              41.8% |
+| Gold   |      9 |              100% |              100% |      79 |               100% |              17.7% |
+
+Every model and column has a description, and every model has at least one test. Most columns
+have no test of their own: tests cover keys, relationships, accepted values and the quality
+checks, not descriptive attributes such as names or amounts. `dbt build` ran 87 nodes: 82
+passed, 5 ended with the expected warnings for the legacy issues above, and none failed.
+`lakehouse_full_refresh` ran the same steps in Airflow with the same result.
+
 ### Reproducibility
 
 The generator anchors dates to the day it runs (`date.today()`), and `scripts/generate_synthea.sh`
@@ -220,7 +277,7 @@ by default, so a new run gives similar but not identical numbers.
 
 - [x] **Phase 1 – Foundation:** legacy source, synthetic data, bronze loaders, first silver/gold models
 - [x] **Phase 2 – Ingestion:** change data capture from the legacy database and latency metrics
-- [ ] **Phase 3 – Modeling:** complete silver/gold layers (eligibility, providers, plans), Airflow orchestration
+- [x] **Phase 3 – Modeling:** complete silver/gold layers (eligibility, providers, plans), Airflow orchestration
 - [ ] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
 - [ ] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
 
@@ -228,9 +285,10 @@ by default, so a new run gives similar but not identical numbers.
 
 ```
 legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
-scripts/       Synthea download and configuration
+scripts/       Synthea download and configuration, dbt coverage report
 ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR) with load logging
 dbt/           Silver and gold models, tests, lineage
+airflow/       Airflow image and DAGs
 fhir/          SQL on FHIR ViewDefinitions
 ```
 

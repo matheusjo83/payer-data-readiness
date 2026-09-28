@@ -1,0 +1,3 @@
+# Build context for airflow/Dockerfile (repository root): only requirements.txt is needed.
+*
+!requirements.txt

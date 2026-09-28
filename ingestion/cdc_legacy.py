@@ -27,6 +27,7 @@ Usage:
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -35,7 +36,10 @@ import psycopg
 
 from common import connect, log_load, logged_load, new_run_id
 
-PG_DSN = "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
+# Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
+PG_DSN = os.environ.get(
+    "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
+)
 SLOT = "lakehouse_cdc"
 TABLES = ["pln", "mbr_mstr", "elig_span", "prv", "clm_hdr", "clm_ln", "pa_req"]
 BATCH_FILE = Path("data/cdc_batch.ndjson")
@@ -116,6 +120,7 @@ def snapshot() -> None:
                     SELECT *,
                            'S'                          AS _op,
                            {snapshot_lsn}::BIGINT       AS _lsn,
+                           0                            AS _seq,
                            NULL::TIMESTAMPTZ            AS _commit_ts,
                            current_timestamp            AS _loaded_at,
                            '{run_id}'                   AS _run_id
@@ -177,6 +182,9 @@ def peek_changes(pg, after_lsn: int):
                 "tbl": msg["table"],
                 "op": action,
                 "lsn": lsn_to_int(msg["lsn"]),
+                # Bulk writes (COPY) put many rows in one WAL record, so rows can
+                # share an LSN; the position in the transaction breaks the tie.
+                "seq": len(pending),
                 "commit_ts": msg["timestamp"],
                 "payload": {c["name"]: normalize(c) for c in cols},
             })
@@ -198,7 +206,7 @@ def apply_changes(con, changes, commit_lsn: str, run_id: str) -> None:
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE _batch AS
         SELECT * FROM read_json('{BATCH_FILE.as_posix()}', columns = {{
-            tbl: 'VARCHAR', op: 'VARCHAR', lsn: 'BIGINT',
+            tbl: 'VARCHAR', op: 'VARCHAR', lsn: 'BIGINT', seq: 'INTEGER',
             commit_ts: 'VARCHAR', payload: 'JSON'
         }})
     """)
@@ -225,12 +233,13 @@ def apply_changes(con, changes, commit_lsn: str, run_id: str) -> None:
                 SELECT {select_cols},
                        op                        AS _op,
                        lsn                       AS _lsn,
+                       seq                       AS _seq,
                        commit_ts::TIMESTAMPTZ    AS _commit_ts,
                        current_timestamp         AS _loaded_at,
                        '{run_id}'                AS _run_id
                 FROM _batch
                 WHERE tbl = '{table}'
-                ORDER BY lsn
+                ORDER BY lsn, seq
             """)
         con.execute(
             "UPDATE bronze._cdc_state SET last_commit_lsn = ?, updated_at = current_timestamp "
@@ -252,11 +261,18 @@ def apply_changes(con, changes, commit_lsn: str, run_id: str) -> None:
                      counts[table] if status == "success" else None, started, finished, status)
 
 
+def ensure_seq_column(con) -> None:
+    """Add _seq to change tables created before it existed (upgrade in place)."""
+    for table in TABLES:
+        con.execute(f"ALTER TABLE {bronze_table(table)} ADD COLUMN IF NOT EXISTS _seq INTEGER DEFAULT 0")
+
+
 def sync_once(pg) -> int:
     """Drain the slot once. Returns the number of changes applied."""
     con = connect()
     try:
         state = read_state(con)
+        ensure_seq_column(con)
     finally:
         con.close()
     last_lsn = state[1]
