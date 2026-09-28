@@ -5,7 +5,7 @@ with ranked as (
         *,
         row_number() over (partition by mbr_id order by upd_ts desc) as _rn,
         count(*)     over (partition by mbr_id)                      as _versions
-    from {{ source('legacy', 'mbr_mstr') }}
+    from {{ legacy_current_state('mbr_mstr', ['mbr_sk']) }}
 )
 
 select

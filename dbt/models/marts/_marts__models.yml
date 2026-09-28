@@ -15,3 +15,10 @@ models:
     description: Data-quality scorecard of known legacy issues detected by the pipeline.
   - name: load_reliability
     description: Load success rate, volume and duration per source.
+  - name: cdc_latency
+    description: >
+      Source-to-lakehouse latency of CDC changes per legacy table
+      (commit in Postgres to arrival in bronze), with change volume by operation.
+    columns:
+      - name: source_table
+        data_tests: [unique, not_null]

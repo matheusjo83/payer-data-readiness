@@ -1,7 +1,18 @@
 services:
   legacy-db:
-    image: postgres:16
+    build: ./legacy_db
+    image: payer-legacy-db:16-wal2json
     container_name: payer-legacy-db
+    # Logical decoding is required for log-based change data capture;
+    # wal2json must also be allowlisted as an output plugin.
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - output_plugin_libraries=pgoutput,test_decoding,wal2json
     environment:
       POSTGRES_DB: payer_legacy
       POSTGRES_USER: legacy

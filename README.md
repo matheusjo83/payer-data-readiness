@@ -24,21 +24,23 @@ This project demonstrates the data layer underneath those APIs:
 ## Architecture
 
 ```
-Synthea (synthetic FHIR R4)  ─┐
-                              ├─► Ingestion ─► Bronze ─► Silver ─► Gold ─► SQL on FHIR views
-Legacy payer DB (Postgres)   ─┘   (logged)     (raw)    (tested)  (models)  Quality & lineage
+Synthea (synthetic FHIR R4) ──── NDJSON load ──┐
+                                               ├─► Bronze ─► Silver ─► Gold ─► SQL on FHIR views
+Legacy payer DB (Postgres) ──── CDC (WAL) ─────┘   (raw)    (tested)  (models)  Quality & lineage
+                                (logged)
 ```
 
 | Layer  | Location (DuckDB)         | Contents                                                 |
 |--------|---------------------------|----------------------------------------------------------|
-| Bronze | `bronze.*`                | Raw legacy snapshots and raw FHIR JSON, plus a load log  |
+| Bronze | `bronze.*`                | Legacy change tables (CDC), raw FHIR JSON, load log      |
 | Silver | `silver.*` (dbt staging)  | Deduplicated, typed, standardized and tested data        |
 | Gold   | `gold.*` (dbt marts)      | Business models, quality scorecard, reliability metrics  |
 
 ## Stack
 
-Runs fully local, at zero cost: **Postgres** (legacy source, Docker), **DuckDB** (lakehouse engine),
-**dbt** (transformations, tests, lineage), **Synthea** (synthetic FHIR data), **Python** (ingestion).
+Runs fully local, at zero cost: **Postgres** (legacy source, Docker, with the **wal2json** logical
+decoding plugin for CDC), **DuckDB** (lakehouse engine), **dbt** (transformations, tests, lineage),
+**Synthea** (synthetic FHIR data), **Python** (ingestion).
 
 ## Quickstart
 
@@ -48,13 +50,26 @@ Requirements: Docker, Python 3.11+, Java 17+ (for Synthea), `make`.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-make up        # start the legacy Postgres database
+make up        # build and start the legacy Postgres database
 make seed      # generate legacy data with deliberate quality issues
 make synthea   # generate synthetic FHIR R4 data (bulk NDJSON)
-make ingest    # load everything into the bronze layer
+make ingest    # CDC snapshot of the legacy tables + FHIR load into the bronze layer
 make dbt       # build silver/gold layers and run data tests
 make docs      # browse models and the lineage graph
 ```
+
+To watch change data capture at work, run the loader and the activity simulator side by side,
+then rebuild the models:
+
+```bash
+make cdc       # terminal 1: stream legacy changes into bronze every 5 seconds (Ctrl+C to stop)
+make changes   # terminal 2: 300 inserts/updates/deletes in the legacy database over 60 seconds
+make dbt       # after stopping `make cdc`: refresh silver/gold, including gold.cdc_latency
+```
+
+DuckDB allows one writer at a time. The CDC loader opens the lakehouse only while it writes a
+batch and retries on the next poll if the file is busy, but `make dbt` can still fail if it starts
+in the middle of a write; stopping `make cdc` first avoids that.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -66,14 +81,40 @@ legacy source. The `gold.dq_issue_summary` model counts them.
 documented rates (duplicate members, invalid gender codes, unparseable birth dates, claims for
 unknown members, paid amounts above charges, orphan claim lines), so detection can be verified.
 
+`legacy_db/seed/simulate_changes.py` generates day-to-day activity, one transaction per event:
+prior authorization decisions and new requests, claim adjudication, new claims, member address
+changes and deletion of voided claims.
+
+## Change data capture
+
+`ingestion/cdc_legacy.py` reads the legacy database's write-ahead log through a logical
+replication slot (wal2json). It does not change the legacy tables and it captures deletes.
+
+- **Initial snapshot.** The slot is created before the tables are copied, so no change committed
+  during the copy is lost. Changes that are both in the copy and in the slot are replayed on top of
+  the copied rows; each change carries the full new row, so the final state is the same.
+- **Bronze change tables.** Each legacy table has an append-only `bronze.legacy_<table>_changes`
+  table: one row per change (`_op` = S snapshot, I insert, U update, D delete, T truncate), with the
+  log position (`_lsn`), the source commit time (`_commit_ts`) and the arrival time (`_loaded_at`).
+- **No lost or repeated batches.** Changes are read without being consumed (`peek`), written to
+  DuckDB in one transaction together with the last commit LSN (`bronze._cdc_state`), and only then
+  released from the slot (`advance`). If the loader stops between the two steps, the next run skips
+  the batch that was already stored. A dbt test checks that no change LSN appears twice.
+- **Current state.** Silver models rebuild each table's current state with the
+  `legacy_current_state` macro: the latest version of each primary key after the last TRUNCATE,
+  without deleted keys. Gold models did not change.
+- **Operational note.** A replication slot makes Postgres keep WAL until it is consumed. If the
+  loader is stopped for a long time, run `python ingestion/cdc_legacy.py drop-slot`; the next
+  `make ingest` takes a new snapshot.
+
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
 |----------------------------------------|-----------------------------------------|-------------|
-| Load success rate, volume and duration | `gold.load_reliability`                 | Phase 1     |
+| Load success rate, volume and duration | `gold.load_reliability`                 | Phase 1, 2  |
 | Known data-quality issues detected     | `gold.dq_issue_summary`                 | Phase 1     |
 | Prior authorization decision timeliness| `gold.fct_prior_auth_timeliness`        | Phase 1     |
-| Source-to-lakehouse latency (CDC)      | Ingestion log                           | Phase 2     |
+| Source-to-lakehouse latency (CDC)      | `gold.cdc_latency`                      | Phase 2     |
 | Test coverage and documented lineage   | dbt artifacts                           | Phase 3     |
 | FHIR view parity (hand-written vs. ViewDefinition) | `fhir/view_definitions/`    | Phase 4     |
 
@@ -144,17 +185,41 @@ From `gold.load_reliability` (backed by `bronze._load_log`).
 Each table and resource type was loaded once, so the 100% success rate comes from a single run
 and does not yet show a trend. The largest load was `Observation` (224,817 resources, 0.76 s).
 
+### Change data capture latency (Phase 2)
+
+Run on 2026-09-28: a fresh snapshot, then `make cdc` (5-second polling) running while
+`make changes` committed 300 events over 60 seconds. From `gold.cdc_latency`; latency is the time
+between the commit in Postgres and the arrival of the change in bronze.
+
+| Table      | Changes | Inserts | Updates | Deletes | p50 latency | p95 latency | Max latency |
+|------------|--------:|--------:|--------:|--------:|------------:|------------:|------------:|
+| `clm_ln`   |     340 |     189 |     117 |      34 |      2.06 s |      4.86 s |      5.05 s |
+| `clm_hdr`  |     143 |      76 |      53 |      14 |      2.13 s |      4.86 s |      5.05 s |
+| `pa_req`   |     121 |      49 |      72 |       0 |      2.50 s |      4.68 s |      4.97 s |
+| `mbr_mstr` |      36 |       0 |      36 |       0 |      2.86 s |      4.53 s |      4.86 s |
+
+Across all 640 changes the median latency was 2.16 s and the maximum 5.05 s, which is what a
+5-second polling interval implies: latency here is set by the polling interval, not by processing
+time. The 640 changes arrived in 27 batches; all 77 table writes succeeded (`bronze._load_log`),
+with an average write time of 0.03 s. After the run, the current state rebuilt from the change
+tables matched the Postgres tables row for row in all seven tables.
+
+Both processes ran on the same machine, so the source and lakehouse clocks agree; with separate
+hosts, clock skew would add to the measured latency.
+
 ### Reproducibility
 
 The generator anchors dates to the day it runs (`date.today()`), and `scripts/generate_synthea.sh`
 downloads the latest Synthea build. Running it on the same day with the same Synthea build gives
 the same results. Running it on a different day, or with a newer Synthea build, can change the
 claim, prior authorization and FHIR counts. The checks and metric definitions stay the same.
+The CDC latency figures depend on timing and on the simulator, which runs without a fixed seed
+by default, so a new run gives similar but not identical numbers.
 
 ## Roadmap
 
 - [x] **Phase 1 – Foundation:** legacy source, synthetic data, bronze loaders, first silver/gold models
-- [ ] **Phase 2 – Ingestion:** change data capture from the legacy database and latency metrics
+- [x] **Phase 2 – Ingestion:** change data capture from the legacy database and latency metrics
 - [ ] **Phase 3 – Modeling:** complete silver/gold layers (eligibility, providers, plans), Airflow orchestration
 - [ ] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
 - [ ] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
@@ -162,9 +227,9 @@ claim, prior authorization and FHIR counts. The checks and metric definitions st
 ## Project structure
 
 ```
-legacy_db/     Legacy schema and synthetic data generator
+legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
 scripts/       Synthea download and configuration
-ingestion/     Bronze-layer loaders with load logging
+ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR) with load logging
 dbt/           Silver and gold models, tests, lineage
 fhir/          SQL on FHIR ViewDefinitions
 ```

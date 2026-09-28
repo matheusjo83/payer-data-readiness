@@ -11,4 +11,4 @@ select
         when 'D' then 'denied'
         when 'P' then 'pending'
     end                       as decision
-from {{ source('legacy', 'pa_req') }}
+from {{ legacy_current_state('pa_req', ['pa_id']) }}
