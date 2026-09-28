@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: ops
+    description: Operational metadata written by the ingestion loaders.
+    schema: bronze
+    tables:
+      - name: load_log
+        identifier: _load_log

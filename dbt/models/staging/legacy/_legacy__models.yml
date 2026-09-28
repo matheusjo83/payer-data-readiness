@@ -1,0 +1,57 @@
+version: 2
+
+models:
+  - name: stg_legacy__members
+    description: Deduplicated members with parsed dates and standardized gender.
+    columns:
+      - name: member_id
+        data_tests: [unique, not_null]
+      - name: gender
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['male', 'female', 'unknown']
+              config: {severity: warn}   # 'invalid' is expected from the legacy source
+      - name: birth_date
+        data_tests:
+          - not_null:
+              config: {severity: warn}   # unparseable legacy dates become null
+
+  - name: stg_legacy__claims
+    columns:
+      - name: claim_id
+        data_tests: [unique, not_null]
+      - name: claim_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['paid', 'denied', 'pending', 'void']
+      - name: member_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_legacy__members')
+                field: member_id
+              config: {severity: warn}   # known referential gaps in the legacy source
+
+  - name: stg_legacy__claim_lines
+    columns:
+      - name: claim_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_legacy__claims')
+                field: claim_id
+              config: {severity: warn}   # orphan lines exist in the legacy source
+
+  - name: stg_legacy__prior_auths
+    columns:
+      - name: prior_auth_id
+        data_tests: [unique, not_null]
+      - name: decision
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['approved', 'denied', 'pending']

@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: fhir
+    description: Raw Synthea FHIR R4 resources, one JSON document per row (bronze layer).
+    schema: bronze
+    tables:
+      - name: patient
+        identifier: fhir_patient
+      - name: claim
+        identifier: fhir_claim

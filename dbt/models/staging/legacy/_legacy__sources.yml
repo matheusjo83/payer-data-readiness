@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: legacy
+    description: Raw snapshots of the simulated legacy payer warehouse (bronze layer).
+    schema: bronze
+    tables:
+      - name: mbr_mstr
+        identifier: legacy_mbr_mstr
+        description: Member master. Known to contain duplicate member IDs.
+      - name: elig_span
+        identifier: legacy_elig_span
+      - name: pln
+        identifier: legacy_pln
+      - name: prv
+        identifier: legacy_prv
+      - name: clm_hdr
+        identifier: legacy_clm_hdr
+      - name: clm_ln
+        identifier: legacy_clm_ln
+        description: Claim lines. No foreign key to the header in the source.
+      - name: pa_req
+        identifier: legacy_pa_req

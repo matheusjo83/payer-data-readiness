@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: fct_claims
+    description: Claims with aggregated lines and integrity flags (gold).
+    columns:
+      - name: claim_id
+        data_tests: [unique, not_null]
+  - name: fct_prior_auth_timeliness
+    description: Prior authorization decision time vs. CMS-0057-F timeframes.
+    columns:
+      - name: prior_auth_id
+        data_tests: [unique, not_null]
+  - name: dq_issue_summary
+    description: Data-quality scorecard of known legacy issues detected by the pipeline.
+  - name: load_reliability
+    description: Load success rate, volume and duration per source.

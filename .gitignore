@@ -1,0 +1,13 @@
+# Local data (synthetic, regenerable)
+data/
+tools/*.jar
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# dbt
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/

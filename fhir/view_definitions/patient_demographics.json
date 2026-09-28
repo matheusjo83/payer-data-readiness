@@ -1,0 +1,22 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "patient_demographics",
+  "status": "draft",
+  "resource": "Patient",
+  "select": [
+    {
+      "column": [
+        { "name": "patient_id", "path": "getResourceKey()" },
+        { "name": "gender", "path": "gender" },
+        { "name": "birth_date", "path": "birthDate" }
+      ]
+    },
+    {
+      "forEach": "address.first()",
+      "column": [
+        { "name": "state", "path": "state" },
+        { "name": "postal_code", "path": "postalCode" }
+      ]
+    }
+  ]
+}

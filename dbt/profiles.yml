@@ -1,0 +1,8 @@
+payer_data_readiness:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: ../data/lakehouse.duckdb
+      schema: main
+      threads: 4

@@ -1,0 +1,17 @@
+name: payer_data_readiness
+version: "0.1.0"
+config-version: 2
+profile: payer_data_readiness
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+models:
+  payer_data_readiness:
+    staging:
+      +schema: silver
+      +materialized: view
+    marts:
+      +schema: gold
+      +materialized: table

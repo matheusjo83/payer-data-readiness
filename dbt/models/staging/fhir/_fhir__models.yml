@@ -1,0 +1,18 @@
+version: 2
+
+models:
+  - name: stg_fhir__patients
+    columns:
+      - name: patient_id
+        data_tests: [unique, not_null]
+      - name: gender
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['male', 'female', 'other', 'unknown']
+  - name: stg_fhir__claims
+    columns:
+      - name: claim_id
+        data_tests: [unique, not_null]
+      - name: patient_ref
+        data_tests: [not_null]

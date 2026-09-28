@@ -1,0 +1,21 @@
+services:
+  legacy-db:
+    image: postgres:16
+    container_name: payer-legacy-db
+    environment:
+      POSTGRES_DB: payer_legacy
+      POSTGRES_USER: legacy
+      POSTGRES_PASSWORD: legacy
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./legacy_db/init:/docker-entrypoint-initdb.d:ro
+      - legacy_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U legacy -d payer_legacy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  legacy_data:
