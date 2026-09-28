@@ -1,9 +1,9 @@
 PY ?= python
 
-.PHONY: up down reset seed synthea ingest dbt docs all
+.PHONY: up down reset seed synthea ingest cdc changes dbt docs all
 
-up:        ## Start the legacy Postgres database
-	docker compose up -d legacy-db
+up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
+	docker compose up -d --build legacy-db
 
 down:      ## Stop containers
 	docker compose down
@@ -18,9 +18,15 @@ seed:      ## Generate synthetic legacy payer data (with deliberate quality issu
 synthea:   ## Generate synthetic FHIR R4 data with Synthea
 	bash scripts/generate_synthea.sh
 
-ingest:    ## Load legacy tables and FHIR NDJSON into the bronze layer
-	$(PY) ingestion/load_legacy.py
+ingest:    ## Snapshot (first run) or sync legacy changes via CDC, and load FHIR NDJSON into bronze
+	$(PY) ingestion/cdc_legacy.py sync
 	$(PY) ingestion/load_fhir.py
+
+cdc:       ## Stream legacy changes into bronze continuously (Ctrl+C to stop)
+	$(PY) ingestion/cdc_legacy.py sync --follow --interval 5
+
+changes:   ## Simulate activity in the legacy database (300 events over 60 seconds)
+	$(PY) legacy_db/seed/simulate_changes.py --events 300 --duration 60
 
 dbt:       ## Build silver and gold layers and run data tests
 	cd dbt && dbt build --profiles-dir .

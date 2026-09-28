@@ -33,6 +33,15 @@ def new_run_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def log_load(con, run_id: str, source: str, target: str, row_count, started: float,
+             finished: float, status: str) -> None:
+    con.execute(
+        "INSERT INTO bronze._load_log VALUES (?, ?, ?, ?, to_timestamp(?), to_timestamp(?), ?, ?)",
+        [run_id, source, target, row_count, started, finished, finished - started, status],
+    )
+    print(f"[{status}] {source} -> {target} ({row_count} rows, {finished - started:.2f}s)")
+
+
 @contextmanager
 def logged_load(con, run_id: str, source: str, target: str):
     """Time a load step and record it in bronze._load_log (success or failure).
@@ -52,8 +61,4 @@ def logged_load(con, run_id: str, source: str, target: str):
         row_count = None
         if status == "success":
             row_count = con.execute(f"SELECT count(*) FROM {target}").fetchone()[0]
-        con.execute(
-            "INSERT INTO bronze._load_log VALUES (?, ?, ?, ?, to_timestamp(?), to_timestamp(?), ?, ?)",
-            [run_id, source, target, row_count, started, finished, finished - started, status],
-        )
-        print(f"[{status}] {source} -> {target} ({row_count} rows, {finished - started:.2f}s)")
+        log_load(con, run_id, source, target, row_count, started, finished, status)

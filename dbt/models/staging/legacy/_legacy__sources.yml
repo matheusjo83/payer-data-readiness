@@ -2,22 +2,26 @@ version: 2
 
 sources:
   - name: legacy
-    description: Raw snapshots of the simulated legacy payer warehouse (bronze layer).
+    description: >
+      CDC change tables of the simulated legacy payer warehouse (bronze layer).
+      Append-only: one row per captured change (_op = S snapshot, I insert,
+      U update, D delete, T truncate), ordered by the source log position (_lsn).
+      Staging models rebuild the current state with the legacy_current_state macro.
     schema: bronze
     tables:
       - name: mbr_mstr
-        identifier: legacy_mbr_mstr
+        identifier: legacy_mbr_mstr_changes
         description: Member master. Known to contain duplicate member IDs.
       - name: elig_span
-        identifier: legacy_elig_span
+        identifier: legacy_elig_span_changes
       - name: pln
-        identifier: legacy_pln
+        identifier: legacy_pln_changes
       - name: prv
-        identifier: legacy_prv
+        identifier: legacy_prv_changes
       - name: clm_hdr
-        identifier: legacy_clm_hdr
+        identifier: legacy_clm_hdr_changes
       - name: clm_ln
-        identifier: legacy_clm_ln
+        identifier: legacy_clm_ln_changes
         description: Claim lines. No foreign key to the header in the source.
       - name: pa_req
-        identifier: legacy_pa_req
+        identifier: legacy_pa_req_changes

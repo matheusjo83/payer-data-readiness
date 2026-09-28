@@ -20,4 +20,4 @@ select
     tot_chrg_amt                                       as total_charged,
     tot_pd_amt                                         as total_paid,
     upd_ts                                             as updated_at
-from {{ source('legacy', 'clm_hdr') }}
+from {{ legacy_current_state('clm_hdr', ['clm_id']) }}
