@@ -25,6 +25,29 @@ This project demonstrates the data layer underneath those APIs:
 limitations, and the [migration checklist](docs/migration-checklist.md) turns them into steps for
 other legacy migrations.
 
+## How this was built
+
+This project was developed with AI assistance, using Claude Code (Anthropic's coding assistant).
+
+- **Idea, architecture and stack.** Matheus Julio de Oliveira came up with the project idea and
+  defined its layered architecture (bronze, silver, gold), designed to run locally with Docker. He
+  chose the tools (Postgres, DuckDB, dbt, Synthea) with help from Claude Code, which also helped
+  narrow his initial, broader idea to payer data, CMS-0057-F and SQL on FHIR.
+- **Phase 1** (legacy source, synthetic data generator, bronze ingestion, first silver and gold
+  models) was written by Matheus.
+- **Phases 2 to 4** (change data capture, modeling and orchestration, FHIR) were implemented by
+  Claude Code under Matheus's supervision. For each main design decision, Claude Code presented
+  alternatives with a recommendation; Matheus evaluated them and chose the recommended option each
+  time. Claude Code wrote the code; ran the tests, reconciliations and validations; and found and
+  diagnosed the problems described in the write-up. Matheus decided how to handle the eligibility
+  artifact. He supervised by reading Claude Code's explanations and summaries at each step.
+- **Documentation.** Claude Code drafted the README's Results section and the sections added from
+  Phase 2 on, the technical write-up and the migration checklist, in the language, format and voice
+  Matheus chose. Matheus reviewed the drafts and checked facts independently, including whether CMS
+  requires or recommends the CARIN Blue Button guide.
+- **Git history.** Matheus made the commits and merged the pull requests, so git lists him as the
+  author of every commit. Commit authorship records who committed a change, not who wrote the code.
+
 ## Architecture
 
 ```
