@@ -259,8 +259,8 @@ select * from {{ vd_eob_summary(ref('fhir_explanation_of_benefit')) }}
 ```
 
 The generated macros are committed, and an Airflow task fails if they are out of date with the
-ViewDefinitions. The main cost of this approach is speed: over Synthea's 48,886
-ExplanationOfBenefit resources, the view is the slowest step of the build, at about 19 seconds.
+ViewDefinitions. The main cost of this approach is speed: over Synthea's 53,875
+ExplanationOfBenefit resources, the view is the slowest step of the build, at about 14 seconds.
 
 ## Legacy data as FHIR, and how it was checked
 
@@ -283,7 +283,7 @@ Three rules guided the mapping:
 
 | Comparison                                   | Rows   | Only in view | Only in reference |
 |----------------------------------------------|-------:|-------------:|------------------:|
-| Synthea patients: view vs. hand-written model |    542 |            0 |                 0 |
+| Synthea patients: view vs. hand-written model |    558 |            0 |                 0 |
 | Legacy patients (round trip)                 |  5,000 |            0 |                 0 |
 | Legacy coverage (round trip)                 |  5,000 |            0 |                 0 |
 | Legacy claims (round trip)                   | 24,507 |            0 |                 0 |
@@ -310,9 +310,14 @@ null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing requ
   current state incrementally instead of rebuilding it with a window function over all changes.
 - **Operations.** A replication slot keeps the database log until it is consumed. The project
   documents how to drop the slot, but production needs monitoring and alerts on slot lag.
-- **Reproducibility.** The generator anchors dates to the day it runs, and the Synthea script
-  downloads the latest build. Runs on the same day with the same Synthea build are identical; runs
-  on other days can differ. Both should be pinned.
+- **Reproducibility.** Both generators are pinned: the legacy generator anchors its dates to a
+  reference date (`--as-of`) instead of the day it runs, and the Synthea script downloads a fixed
+  release (v4.0.0, checked by SHA-256) and runs it with fixed seeds, a fixed reference date and a
+  fixed end date (without the end date, Synthea simulates up to the moment it runs). What still
+  varies is timing: load times, CDC latency and the activity simulator, which runs in real time
+  without a fixed seed. Member months also grow with the date `dbt build` runs, and Synthea
+  leaves a few allergy details (CarePlan activities, a reaction severity) unstable between runs,
+  in resource types no model reads.
 - **The compiler.** It covers the FHIRPath features the shareable tests exercise, without the
   boundary functions. Real-world ViewDefinitions may use features beyond that set.
 
@@ -326,7 +331,7 @@ null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing requ
 3. **Make tests prove they can fail.** A parity check or a validator that always passes is only
    evidence once you have seen it catch a deliberate error.
 4. **Publish the uncomfortable numbers.** Column test coverage of 24%, eight unimplemented
-   experimental tests and a 19-second view are part of the result. Hiding them would make every
+   experimental tests and a 14-second view are part of the result. Hiding them would make every
    other number less credible.
 5. **Treat the data layer as the product.** An interoperability API can only be as reliable as the
    data behind it. Most of the effort, and most of the evidence, belongs there.

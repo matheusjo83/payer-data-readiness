@@ -3,8 +3,13 @@
 All data is fictitious. Issues are injected at known rates so that the
 lakehouse quality checks can later measure (and prove) that they were caught.
 
+Dates are anchored to a reference date (--as-of) instead of the day the script
+runs, so the same seed and reference date always produce the same data. The
+default is the date of the figures published in the README.
+
 Usage:
     python legacy_db/seed/generate_legacy_data.py --members 5000 --claims 25000
+    python legacy_db/seed/generate_legacy_data.py --as-of 2027-01-15
 """
 
 import argparse
@@ -29,6 +34,9 @@ RATE_CLAIM_UNKNOWN_MEMBER = 0.010
 RATE_PAID_GT_CHARGED = 0.020
 RATE_ORPHAN_LINE = 0.005
 RATE_CLAIM_OUTSIDE_ELIGIBILITY = 0.010
+
+# Reference date of the figures published in the README.
+DEFAULT_AS_OF = date(2026, 9, 28)
 
 FIRST = ["James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael",
          "Linda", "David", "Elizabeth", "Maria", "Jose", "Wei", "Aisha", "Carlos"]
@@ -80,11 +88,15 @@ def main() -> None:
     ap.add_argument("--claims", type=int, default=25000)
     ap.add_argument("--prior-auths", type=int, default=3000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--as-of", type=date.fromisoformat, default=DEFAULT_AS_OF,
+                    help="reference date (YYYY-MM-DD) that all generated dates are relative to "
+                         f"(default: {DEFAULT_AS_OF})")
     args = ap.parse_args()
     random.seed(args.seed)
 
-    now = datetime.now()
-    today = date.today()
+    # "Now" is midnight at the start of the reference date.
+    today = args.as_of
+    now = datetime.combine(today, datetime.min.time())
 
     # Plans
     plans = [(pid, nm, lob, "20200101", "99991231") for pid, nm, lob in PLANS]
@@ -200,7 +212,7 @@ def main() -> None:
 
     print(f"Loaded: {len(members)} member rows ({len(members) - len(member_ids)} duplicates), "
           f"{len(providers)} providers, {len(claims)} claims, {len(lines)} claim lines "
-          f"({n_orphans} orphans), {len(pas)} prior auths.")
+          f"({n_orphans} orphans), {len(pas)} prior auths, as of {today}.")
 
 
 if __name__ == "__main__":
