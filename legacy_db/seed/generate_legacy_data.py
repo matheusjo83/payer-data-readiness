@@ -5,7 +5,7 @@ lakehouse quality checks can later measure (and prove) that they were caught.
 
 Dates are anchored to a reference date (--as-of) instead of the day the script
 runs, so the same seed and reference date always produce the same data. The
-default is the date of the figures published in the README.
+default is the date of the figures published in docs/results.md.
 
 Usage:
     python legacy_db/seed/generate_legacy_data.py --members 5000 --claims 25000
@@ -35,7 +35,7 @@ RATE_PAID_GT_CHARGED = 0.020
 RATE_ORPHAN_LINE = 0.005
 RATE_CLAIM_OUTSIDE_ELIGIBILITY = 0.010
 
-# Reference date of the figures published in the README.
+# Reference date of the figures published in docs/results.md.
 DEFAULT_AS_OF = date(2026, 9, 28)
 
 FIRST = ["James", "Mary", "Robert", "Patricia", "John", "Jennifer", "Michael",

@@ -21,7 +21,7 @@ platform.
 - [ ] **Find records you can identify independently of the pipeline.** A set of known-bad records,
   found by a query or a manual review, lets you check detection against ground truth instead of a
   rate.
-  *In this repo:* the orphan lines (`C9…`) and unknown members (`M9…`) traced in the README Results.
+  *In this repo:* the orphan lines (`C9…`) and unknown members (`M9…`) traced in the [results](results.md#data-quality).
 - [ ] **Check test data for artifacts of how it was produced.** Synthetic or masked data can create
   "issues" that are really side effects of generation. Investigate surprising rates before you
   report them.
@@ -60,7 +60,7 @@ platform.
 
 - [ ] **Compare rebuilt state with the source, row by row.** Counts can match while values differ.
   Compare full rows in both directions (`EXCEPT ALL`).
-  *In this repo:* the reconciliation run after every CDC test (reported in the README).
+  *In this repo:* the reconciliation run after every CDC test (reported in the [results](results.md#change-data-capture-latency-phase-2)).
 - [ ] **Measure source-to-target latency from commit time.** Use the source commit timestamp and
   the arrival time, not the job schedule. Know whether latency comes from polling or from
   processing.
@@ -153,17 +153,17 @@ platform.
   *In this repo:* `fhir/validate.py` with the HL7 FHIR validator against base FHIR R4.
 - [ ] **Prove that each check can fail.** Run parity checks and validators against deliberately
   broken input and confirm they report the expected number of failures.
-  *In this repo:* the sabotage runs reported in the README Results.
+  *In this repo:* the sabotage runs reported in the [results](results.md#fhir-phase-4).
 - [ ] **Validate against the target profiles and a terminology server.**
   **Not covered here** (base R4 only, `-tx n/a`).
 
 ## 9. Report results people can trust
 
 - [ ] **Tie every published number to a query or a command** that reproduces it.
-  *In this repo:* the README Results section names the model or `make` target for each figure.
+  *In this repo:* the [results](results.md) page names the model or `make` target for each figure.
 - [ ] **State what the numbers do not show.** Synthetic data, single machine, validation scope.
 - [ ] **Update published numbers when the code changes them**, and say why they changed.
-  *In this repo:* the Phase 3 note in the README Results.
+  *In this repo:* the Phase 3 note in the [results](results.md).
 - [ ] **Make runs reproducible.** Fixed seeds, pinned tool versions and a single command sequence.
   *In this repo:* seed 42 and pinned Python packages; the generator's dependence on the run date and
   the unpinned Synthea download are documented limitations.
