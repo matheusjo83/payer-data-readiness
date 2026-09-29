@@ -1,7 +1,7 @@
 """Orchestration of the payer lakehouse pipeline.
 
 legacy_cdc_refresh      every 30 minutes: apply legacy changes (CDC), rebuild silver/gold
-lakehouse_full_refresh  on demand: CDC, FHIR load, rebuild, coverage report
+lakehouse_full_refresh  on demand: CDC, FHIR load, ViewDefinition check, rebuild, coverage report
 
 Every task that writes the DuckDB lakehouse runs in the `lakehouse` pool (1 slot),
 because DuckDB allows a single writer: tasks from both DAGs queue instead of
@@ -49,7 +49,7 @@ with DAG(
 
 with DAG(
     dag_id="lakehouse_full_refresh",
-    description="CDC sync, FHIR load, dbt build and coverage report",
+    description="CDC sync, FHIR load, ViewDefinition check, dbt build and coverage report",
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
@@ -58,9 +58,13 @@ with DAG(
     tags=["payer", "cdc", "fhir", "dbt"],
 ):
     load_fhir = BashOperator(task_id="load_fhir", bash_command=f"{PY} ingestion/load_fhir.py", cwd=PROJECT)
+    # Fails when a ViewDefinition changed but its dbt macro was not regenerated (make views).
+    views_check = BashOperator(
+        task_id="views_check", bash_command=f"{PY} fhir/build_views.py --check", cwd=PROJECT, pool="default_pool"
+    )
     coverage = BashOperator(
         task_id="dbt_coverage",
         bash_command=f"cd dbt && {DBT} docs generate --profiles-dir . && cd .. && {PY} scripts/dbt_coverage.py",
         cwd=PROJECT,
     )
-    cdc_sync() >> load_fhir >> dbt_build() >> coverage
+    cdc_sync() >> load_fhir >> views_check >> dbt_build() >> coverage

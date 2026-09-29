@@ -1,0 +1,22 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "eob_summary",
+  "status": "draft",
+  "resource": "ExplanationOfBenefit",
+  "select": [
+    {
+      "column": [
+        { "name": "eob_id", "path": "getResourceKey()", "type": "id" },
+        { "name": "patient_id", "path": "patient.getReferenceKey(Patient)", "type": "id" },
+        { "name": "claim_type", "path": "type.coding.where(system = 'http://terminology.hl7.org/CodeSystem/claim-type').code.first()", "type": "code" },
+        { "name": "status", "path": "status", "type": "code" },
+        { "name": "outcome", "path": "outcome", "type": "code" },
+        { "name": "created", "path": "created", "type": "dateTime" },
+        { "name": "billable_start", "path": "billablePeriod.start", "type": "dateTime" },
+        { "name": "item_count", "path": "item.count()", "type": "integer" },
+        { "name": "submitted_amount", "path": "total.where(category.coding.code = 'submitted').amount.value.first()", "type": "decimal" },
+        { "name": "paid_amount", "path": "payment.amount.value", "type": "decimal" }
+      ]
+    }
+  ]
+}

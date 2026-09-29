@@ -1,0 +1,97 @@
+version: 2
+
+# Outputs of the SQL on FHIR ViewDefinitions in fhir/view_definitions/, compiled to
+# dbt macros by fhir/build_views.py. vd_synthea__* run over Synthea FHIR, vd_legacy__*
+# over the FHIR resources built from the legacy warehouse.
+
+models:
+  - name: vd_synthea__patient_demographics
+    description: ViewDefinition patient_demographics over Synthea Patient resources.
+    columns: &patient_demographics
+      - name: patient_id
+        description: Patient resource key (Patient.id).
+        data_tests: [unique, not_null]
+      - name: gender
+        description: Patient.gender.
+      - name: birth_date
+        description: Patient.birthDate, as text (FHIR dates may be partial).
+      - name: state
+        description: State of the first address.
+      - name: postal_code
+        description: Postal code of the first address.
+
+  - name: vd_legacy__patient_demographics
+    description: ViewDefinition patient_demographics over legacy-derived Patient resources.
+    columns: *patient_demographics
+
+  - name: vd_legacy__coverage_summary
+    description: ViewDefinition coverage_summary over legacy-derived Coverage resources.
+    columns:
+      - name: coverage_id
+        description: Coverage resource key.
+        data_tests: [unique, not_null]
+      - name: patient_id
+        description: Patient key referenced by Coverage.beneficiary.
+        data_tests: [not_null]
+      - name: status
+        description: Coverage.status.
+      - name: plan_id
+        description: Value of the Coverage.class with type 'plan'.
+      - name: plan_name
+        description: Name of the Coverage.class with type 'plan'.
+      - name: period_start
+        description: Coverage.period.start, as text.
+      - name: period_end
+        description: Coverage.period.end, as text. Null for open-ended coverage.
+
+  - name: vd_synthea__eob_summary
+    description: ViewDefinition eob_summary over Synthea ExplanationOfBenefit resources.
+    columns: &eob_summary
+      - name: eob_id
+        description: ExplanationOfBenefit resource key.
+        data_tests: [unique, not_null]
+      - name: patient_id
+        description: Patient key referenced by EOB.patient.
+        data_tests: [not_null]
+      - name: claim_type
+        description: EOB.type code from the claim-type code system.
+      - name: status
+        description: EOB.status.
+      - name: outcome
+        description: EOB.outcome.
+      - name: created
+        description: EOB.created, as text.
+      - name: billable_start
+        description: EOB.billablePeriod.start, as text.
+      - name: item_count
+        description: Number of EOB.item entries.
+      - name: submitted_amount
+        description: Amount of the EOB.total with category 'submitted'.
+      - name: paid_amount
+        description: EOB.payment.amount.value.
+
+  - name: vd_legacy__eob_summary
+    description: ViewDefinition eob_summary over legacy-derived ExplanationOfBenefit resources.
+    columns: *eob_summary
+
+  - name: vd_synthea__eob_items
+    description: ViewDefinition eob_items over Synthea ExplanationOfBenefit resources (one row per item).
+    columns: &eob_items
+      - name: eob_id
+        description: ExplanationOfBenefit resource key.
+        data_tests: [not_null]
+      - name: item_sequence
+        description: EOB.item.sequence.
+        data_tests: [not_null]
+      - name: product_system
+        description: Code system of EOB.item.productOrService (CPT for legacy, SNOMED CT for Synthea).
+      - name: product_code
+        description: Code of EOB.item.productOrService.
+      - name: serviced_start
+        description: EOB.item.servicedDate, or the start of EOB.item.servicedPeriod, as text.
+      - name: net_amount
+        description: EOB.item.net.value.
+
+  - name: vd_legacy__eob_items
+    description: ViewDefinition eob_items over legacy-derived ExplanationOfBenefit resources (one row per item).
+    columns: *eob_items

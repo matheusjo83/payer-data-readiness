@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: fhir_patient
+    description: >
+      Legacy members as FHIR R4 Patient resources (JSON), aligned with the CARIN Blue Button
+      Patient profile. Legacy gender codes outside M/F/U are omitted.
+    columns:
+      - name: id
+        description: Patient.id (legacy member ID).
+        data_tests: [unique, not_null]
+      - name: resource
+        description: The FHIR Patient resource as JSON, without null values.
+        data_tests: [not_null]
+
+  - name: fhir_coverage
+    description: >
+      Legacy coverage spans as FHIR R4 Coverage resources (JSON), aligned with the CARIN Blue
+      Button Coverage profile.
+    columns:
+      - name: id
+        description: Coverage.id ('cov-' + legacy eligibility key).
+        data_tests: [unique, not_null]
+      - name: resource
+        description: The FHIR Coverage resource as JSON, without null values.
+        data_tests: [not_null]
+
+  - name: fhir_explanation_of_benefit
+    description: >
+      Legacy claims as FHIR R4 ExplanationOfBenefit resources (JSON), aligned with the CARIN
+      Blue Button EOB profiles. Only claims with a known member and a coverage span on the
+      service date are exported.
+    columns:
+      - name: id
+        description: ExplanationOfBenefit.id (legacy claim ID).
+        data_tests: [unique, not_null]
+      - name: resource
+        description: The FHIR ExplanationOfBenefit resource as JSON, without null values.
+        data_tests: [not_null]
