@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed synthea ingest cdc changes dbt coverage docs airflow-up airflow-down all
+.PHONY: up down reset seed synthea ingest cdc changes views conformance dbt coverage fhir-validate docs airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
@@ -28,6 +28,12 @@ cdc:       ## Stream legacy changes into bronze continuously (Ctrl+C to stop)
 changes:   ## Simulate activity in the legacy database (300 events over 60 seconds)
 	$(PY) legacy_db/seed/simulate_changes.py --events 300 --duration 60
 
+views:     ## Compile the SQL on FHIR ViewDefinitions (fhir/view_definitions) into dbt macros
+	$(PY) fhir/build_views.py
+
+conformance: ## Run the official SQL on FHIR v2 test suite against the ViewDefinition compiler
+	$(PY) fhir/conformance.py
+
 dbt:       ## Build silver and gold layers and run data tests
 	cd dbt && dbt build --profiles-dir .
 
@@ -40,6 +46,9 @@ airflow-up:   ## Build and start Airflow (UI at http://localhost:8080)
 
 airflow-down: ## Stop Airflow (the legacy database keeps running)
 	docker compose --profile airflow stop airflow airflow-db
+
+fhir-validate: ## Validate a sample of the legacy-derived FHIR resources with the HL7 validator (Java)
+	$(PY) fhir/validate.py
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

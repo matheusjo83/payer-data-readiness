@@ -1,0 +1,23 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "eob_items",
+  "status": "draft",
+  "resource": "ExplanationOfBenefit",
+  "select": [
+    {
+      "column": [
+        { "name": "eob_id", "path": "getResourceKey()", "type": "id" }
+      ]
+    },
+    {
+      "forEach": "item",
+      "column": [
+        { "name": "item_sequence", "path": "sequence", "type": "positiveInt" },
+        { "name": "product_system", "path": "productOrService.coding.system.first()", "type": "uri" },
+        { "name": "product_code", "path": "productOrService.coding.code.first()", "type": "code" },
+        { "name": "serviced_start", "path": "(serviced.ofType(date) | serviced.ofType(Period).start).first()", "type": "dateTime" },
+        { "name": "net_amount", "path": "net.value", "type": "decimal" }
+      ]
+    }
+  ]
+}

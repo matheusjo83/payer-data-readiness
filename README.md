@@ -38,8 +38,10 @@ Legacy payer DB (Postgres) ──── CDC (WAL) ─────┘   (raw)    
 | Gold   | `gold.*` (dbt marts)      | Dimensions, facts, quality scorecard, reliability metrics |
 
 Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_member_months`,
-`fct_prior_auth_timeliness`, plus the quality and reliability models `dq_issue_summary`,
-`load_reliability` and `cdc_latency`.
+`fct_prior_auth_timeliness`; the quality and reliability models `dq_issue_summary`,
+`load_reliability`, `cdc_latency` and `fhir_view_parity`; the FHIR resources built from the legacy
+data (`fhir_patient`, `fhir_coverage`, `fhir_explanation_of_benefit`); and the SQL on FHIR view
+outputs (`vd_synthea__*`, `vd_legacy__*`).
 
 ## Stack
 
@@ -62,6 +64,14 @@ make ingest    # CDC snapshot of the legacy tables + FHIR load into the bronze l
 make dbt       # build silver/gold layers and run data tests
 make coverage  # documentation and test coverage of the dbt models
 make docs      # browse models and the lineage graph
+```
+
+FHIR (Phase 4):
+
+```bash
+make conformance    # run the official SQL on FHIR v2 test suite against the view compiler
+make views          # recompile fhir/view_definitions/*.json into dbt macros (after editing a view)
+make fhir-validate  # validate a sample of the legacy-derived FHIR resources (HL7 validator, Java)
 ```
 
 To watch change data capture at work, run the loader and the activity simulator side by side,
@@ -124,7 +134,7 @@ replication slot (wal2json). It does not change the legacy tables and it capture
 | DAG                      | Schedule          | Tasks                                                   |
 |--------------------------|-------------------|---------------------------------------------------------|
 | `legacy_cdc_refresh`     | every 30 minutes  | `cdc_sync` → `dbt_build`                                |
-| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `dbt_build` → `dbt_coverage` |
+| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `views_check` → `dbt_build` → `dbt_coverage` |
 
 Both DAGs start paused. Design choices:
 
@@ -141,6 +151,50 @@ Both DAGs start paused. Design choices:
   metadata. A production deployment would run the scheduler, API server and workers as separate
   services with real authentication.
 
+## SQL on FHIR
+
+`fhir/sof_duckdb/` compiles [SQL on FHIR v2](https://sql-on-fhir.org/) `ViewDefinition`s into DuckDB
+SQL, so the views run inside the lakehouse on the raw FHIR JSON in bronze.
+
+- **How it compiles.** Every FHIRPath expression becomes a DuckDB expression of type `JSON[]` (a
+  FHIRPath collection). Each `select` becomes a list of JSON rows: `forEach` maps over a collection,
+  `unionAll` concatenates lists and nested selects are combined with a cartesian product. The query
+  then unnests the rows of each resource and projects the columns. Everything is an expression over
+  the resource, with no joins, because DuckDB does not allow subqueries inside lambdas.
+- **Conformance.** `make conformance` runs the specification's shared test suite
+  ([sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js), pinned to commit `0821b67`) and
+  compares results the way the reference runner does. Not supported: `lowBoundary()` and
+  `highBoundary()` (experimental). `repeat` is unrolled to 10 levels.
+- **dbt integration.** `make views` turns each file in `fhir/view_definitions/` into a dbt macro that
+  takes the relation holding the resources, so one view runs over any source:
+  `select * from {{ vd_eob_summary(ref('fhir_explanation_of_benefit')) }}`. The generated macros are
+  committed; Airflow's `views_check` task fails if they are out of date.
+
+Four views are defined: `patient_demographics`, `coverage_summary`, `eob_summary` and `eob_items`.
+
+## Legacy data as FHIR
+
+The gold models `fhir_patient`, `fhir_coverage` and `fhir_explanation_of_benefit` turn the legacy
+warehouse into FHIR R4 resources aligned with the
+[CARIN Blue Button](https://hl7.org/fhir/us/carin-bb/) profiles, the implementation guide CMS
+requires for the Patient Access API. "Aligned" means they carry the elements those profiles center on
+(identifiers, coverage, claim type, adjudication amounts); they are validated against base FHIR R4,
+not against the CARIN profiles.
+
+- **Nothing invented.** Legacy gender codes outside M/F/U are omitted rather than mapped to a guess,
+  and FHIR's rule against null values and empty arrays is enforced when the JSON is built.
+- **Integrity gate.** An ExplanationOfBenefit requires a patient and a coverage, so claims with an
+  unknown member or outside the member's coverage are not exported; they stay flagged in
+  `gold.fct_claims`.
+- **Round trips.** `gold.fhir_view_parity` runs the ViewDefinitions over the legacy-derived
+  resources and compares the result with the gold tables they came from, row by row. It also
+  compares the `patient_demographics` view over Synthea with the hand-written `stg_fhir__patients`.
+  A dbt test fails if any comparison finds a row on only one side.
+- **Validation.** `make fhir-validate` runs the official HL7 FHIR validator (6.10.4) on a
+  reproducible sample. Terminology is not checked (`-tx n/a`): the validator checks structure,
+  cardinality, data types, required value sets and invariants, but not whether CPT or ICD-10-CM
+  codes exist.
+
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
@@ -150,7 +204,9 @@ Both DAGs start paused. Design choices:
 | Prior authorization decision timeliness| `gold.fct_prior_auth_timeliness`        | Phase 1     |
 | Source-to-lakehouse latency (CDC)      | `gold.cdc_latency`                      | Phase 2     |
 | Test coverage and documented lineage   | `make coverage` (dbt artifacts)         | Phase 3     |
-| FHIR view parity (hand-written vs. ViewDefinition) | `fhir/view_definitions/`    | Phase 4     |
+| FHIR view parity (hand-written vs. ViewDefinition) | `gold.fhir_view_parity` | Phase 4     |
+| SQL on FHIR conformance                | `make conformance`                      | Phase 4     |
+| FHIR validity of legacy-derived data   | `make fhir-validate`                    | Phase 4     |
 
 ## Results
 
@@ -248,19 +304,67 @@ tables matched the Postgres tables row for row in all seven tables.
 Both processes ran on the same machine, so the source and lakehouse clocks agree; with separate
 hosts, clock skew would add to the measured latency.
 
-### Documentation and test coverage (Phase 3)
+### FHIR (Phase 4)
+
+**SQL on FHIR conformance** (`make conformance`, suite commit `0821b67`):
+
+| Test group   | Passed | Total |
+|--------------|-------:|------:|
+| Shareable    |    133 |   133 |
+| Experimental |      3 |    11 |
+
+The 8 experimental tests that fail are the `lowBoundary()`/`highBoundary()` tests, which the
+compiler does not implement.
+
+**Legacy data exported as FHIR:** 5,000 Patient, 5,000 Coverage and 24,507 ExplanationOfBenefit
+resources. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
+unknown member and 251 outside the member's coverage, the counts in the data-quality table above.
+
+**View parity** (`gold.fhir_view_parity`):
+
+| Comparison           | View rows | Reference rows | Only in view | Only in reference |
+|----------------------|----------:|---------------:|-------------:|------------------:|
+| `synthea_patients`   |       542 |            542 |            0 |                 0 |
+| `legacy_patients`    |     5,000 |          5,000 |            0 |                 0 |
+| `legacy_coverage`    |     5,000 |          5,000 |            0 |                 0 |
+| `legacy_claims`      |    24,507 |         24,507 |            0 |                 0 |
+| `legacy_claim_lines` |    61,228 |         61,228 |            0 |                 0 |
+
+To check that the comparison can fail, it was run against deliberately altered references: swapping
+paid for charged amounts gave 24,507 mismatched rows, adding the claims outside coverage gave 251,
+and mapping invalid gender codes to `unknown` gave 51.
+
+**FHIR validation** (`make fhir-validate`, 200 resources of each type, base FHIR R4):
+
+| Resource             | Validated | Errors | Warnings |
+|----------------------|----------:|-------:|---------:|
+| Patient              |       200 |      0 |      200 |
+| Coverage             |       200 |      0 |      200 |
+| ExplanationOfBenefit |       200 |      0 |      200 |
+
+Every warning is `dom-6`, the best-practice recommendation that resources carry a human-readable
+narrative (`text`), which these resources do not have. As a check, the validator rejected
+hand-made resources with the legacy problems the mapping avoids (a null value, gender `invalid`, a
+`YYYYMMDD` date, an empty array, missing required elements).
+
+**One view, two sources.** The same `eob_summary` and `eob_items` views run over Synthea (48,886
+ExplanationOfBenefit resources, 190,665 items) and over the legacy-derived resources (24,507 and
+61,228), producing tables with the same columns. The Synthea view is the slowest step of
+`dbt build` (about 19 seconds on this machine).
+
+### Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
-columns that exist in the database).
+columns that exist in the database), after Phase 4.
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
 | Silver |      9 |              100% |              100% |      67 |               100% |              41.8% |
-| Gold   |      9 |              100% |              100% |      79 |               100% |              17.7% |
+| Gold   |     20 |              100% |              100% |     140 |               100% |              24.3% |
 
 Every model and column has a description, and every model has at least one test. Most columns
-have no test of their own: tests cover keys, relationships, accepted values and the quality
-checks, not descriptive attributes such as names or amounts. `dbt build` ran 87 nodes: 82
+have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
+checks, not descriptive attributes such as names or amounts. `dbt build` ran 128 nodes: 123
 passed, 5 ended with the expected warnings for the legacy issues above, and none failed.
 `lakehouse_full_refresh` ran the same steps in Airflow with the same result.
 
@@ -278,7 +382,7 @@ by default, so a new run gives similar but not identical numbers.
 - [x] **Phase 1 – Foundation:** legacy source, synthetic data, bronze loaders, first silver/gold models
 - [x] **Phase 2 – Ingestion:** change data capture from the legacy database and latency metrics
 - [x] **Phase 3 – Modeling:** complete silver/gold layers (eligibility, providers, plans), Airflow orchestration
-- [ ] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
+- [x] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
 - [ ] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
 
 ## Project structure
@@ -289,7 +393,7 @@ scripts/       Synthea download and configuration, dbt coverage report
 ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR) with load logging
 dbt/           Silver and gold models, tests, lineage
 airflow/       Airflow image and DAGs
-fhir/          SQL on FHIR ViewDefinitions
+fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation
 ```
 
 ## Author

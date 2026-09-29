@@ -9,3 +9,5 @@ sources:
         identifier: fhir_patient
       - name: claim
         identifier: fhir_claim
+      - name: explanation_of_benefit
+        identifier: fhir_explanation_of_benefit

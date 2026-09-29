@@ -13,7 +13,8 @@ with lines as (
 covering_span as (
     select
         c.claim_id,
-        min(e.plan_id) as plan_id
+        min(e.plan_id)        as plan_id,
+        min(e.eligibility_id) as eligibility_id
     from {{ ref('stg_legacy__claims') }} c
     join {{ ref('stg_legacy__eligibility') }} e
       on e.member_id = c.member_id
@@ -29,6 +30,7 @@ select
     l.lines_paid,
     m.member_id is not null                      as has_known_member,
     s.plan_id,
+    s.eligibility_id,
     case when m.member_id is not null
          then s.claim_id is not null end         as is_within_eligibility,
     c.total_paid > c.total_charged               as paid_exceeds_charged,

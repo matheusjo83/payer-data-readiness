@@ -46,6 +46,13 @@ models:
               arguments:
                 to: ref('dim_plan')
                 field: plan_id
+      - name: eligibility_id
+        description: Coverage span in effect on the service date. Null when there is none.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_legacy__eligibility')
+                field: eligibility_id
       - name: is_within_eligibility
         description: >
           True when the service date falls inside one of the member's coverage spans.
@@ -235,3 +242,21 @@ models:
         description: Commit time of the most recent captured change.
       - name: last_loaded_at
         description: Arrival time of the most recent captured change.
+
+  - name: fhir_view_parity
+    description: >
+      Rows found on only one side when a ViewDefinition output is compared with the table it
+      should reproduce: the hand-written Synthea patient model, and round trips of the legacy
+      data through FHIR (gold table -> FHIR resource -> ViewDefinition).
+    columns:
+      - name: comparison
+        description: Name of the comparison.
+        data_tests: [unique, not_null]
+      - name: view_rows
+        description: Rows produced by the ViewDefinition.
+      - name: reference_rows
+        description: Rows in the reference table.
+      - name: only_in_view
+        description: ViewDefinition rows with no identical reference row (EXCEPT ALL).
+      - name: only_in_reference
+        description: Reference rows with no identical ViewDefinition row (EXCEPT ALL).

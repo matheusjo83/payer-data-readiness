@@ -1,0 +1,19 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "coverage_summary",
+  "status": "draft",
+  "resource": "Coverage",
+  "select": [
+    {
+      "column": [
+        { "name": "coverage_id", "path": "getResourceKey()", "type": "id" },
+        { "name": "patient_id", "path": "beneficiary.getReferenceKey(Patient)", "type": "id" },
+        { "name": "status", "path": "status", "type": "code" },
+        { "name": "plan_id", "path": "class.where(type.coding.code = 'plan').value.first()", "type": "string" },
+        { "name": "plan_name", "path": "class.where(type.coding.code = 'plan').name.first()", "type": "string" },
+        { "name": "period_start", "path": "period.start", "type": "dateTime" },
+        { "name": "period_end", "path": "period.end", "type": "dateTime" }
+      ]
+    }
+  ]
+}
