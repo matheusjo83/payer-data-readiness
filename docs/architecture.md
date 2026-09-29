@@ -1,0 +1,119 @@
+# Architecture
+
+How each part of the lakehouse works. The overview, the stack and the Quickstart are in the
+[README](../README.md).
+
+## Layers and models
+
+The architecture diagram and the layer table are in the [README](../README.md#architecture).
+
+Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_member_months`,
+`fct_prior_auth_timeliness`; the quality and reliability models `dq_issue_summary`,
+`load_reliability`, `cdc_latency` and `fhir_view_parity`; the FHIR resources built from the legacy
+data (`fhir_patient`, `fhir_coverage`, `fhir_explanation_of_benefit`); and the SQL on FHIR view
+outputs (`vd_synthea__*`, `vd_legacy__*`).
+
+## The simulated legacy source
+
+`legacy_db/init/01_schema.sql` reproduces typical legacy traits: cryptic names, dates stored as
+`VARCHAR(8)`, single-character codes and no foreign keys. The generator injects known issues at
+documented rates (duplicate members, invalid gender codes, unparseable birth dates, claims for
+unknown members, paid amounts above charges, orphan claim lines, claims with a service date
+outside the member's coverage), so detection can be verified.
+
+`legacy_db/seed/simulate_changes.py` generates day-to-day activity, one transaction per event:
+prior authorization decisions and new requests, claim adjudication, new claims, member address
+changes and deletion of voided claims.
+
+## Change data capture
+
+`ingestion/cdc_legacy.py` reads the legacy database's write-ahead log through a logical
+replication slot (wal2json). It does not change the legacy tables and it captures deletes.
+
+- **Initial snapshot.** The slot is created before the tables are copied, so no change committed
+  during the copy is lost. Changes that are both in the copy and in the slot are replayed on top of
+  the copied rows; each change carries the full new row, so the final state is the same.
+- **Bronze change tables.** Each legacy table has an append-only `bronze.legacy_<table>_changes`
+  table: one row per change (`_op` = S snapshot, I insert, U update, D delete, T truncate), with the
+  log position (`_lsn`, plus `_seq` for rows that a bulk write such as `COPY` puts in one WAL record),
+  the source commit time (`_commit_ts`) and the arrival time (`_loaded_at`).
+- **No lost or repeated batches.** Changes are read without being consumed (`peek`), written to
+  DuckDB in one transaction together with the last commit LSN (`bronze._cdc_state`), and only then
+  released from the slot (`advance`). If the loader stops between the two steps, the next run skips
+  the batch that was already stored. A dbt test checks that no log position (`_lsn`, `_seq`) appears
+  twice.
+- **Current state.** Silver models rebuild each table's current state with the
+  `legacy_current_state` macro: the latest version of each primary key after the last TRUNCATE,
+  without deleted keys. Rows that share an `_lsn` are ordered by `_seq`.
+- **Operational note.** A replication slot makes Postgres keep WAL until it is consumed. If the
+  loader is stopped for a long time, run `python ingestion/cdc_legacy.py drop-slot`; the next
+  `make ingest` takes a new snapshot.
+
+## Orchestration
+
+`airflow/dags/payer_lakehouse.py` defines two DAGs, run by Airflow 3 in Docker
+(`make airflow-up`, UI at http://localhost:8080, no login in this local setup):
+
+| DAG                      | Schedule          | Tasks                                                   |
+|--------------------------|-------------------|---------------------------------------------------------|
+| `legacy_cdc_refresh`     | every 30 minutes  | `cdc_sync` → `dbt_build`                                |
+| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `views_check` → `dbt_build` → `dbt_coverage` |
+
+Both DAGs start paused. Design choices:
+
+- **Airflow only orchestrates.** Tasks call the same scripts and `dbt build` used by `make`,
+  through `BashOperator`. The loaders and dbt run in their own virtualenv inside the image, so
+  their dependencies never conflict with Airflow's. Versions are pinned in `requirements.txt`,
+  because the host and the container write the same DuckDB file.
+- **One writer at a time.** Every task runs in the `lakehouse` pool, which has one slot: tasks
+  from both DAGs wait for each other instead of failing on a locked DuckDB file. Do not run the
+  `make` targets that write to the lakehouse while Airflow is running tasks.
+- **Failure policy.** Each task retries twice. Data tests configured as warnings (known legacy
+  issues) do not fail `dbt_build`; test errors do.
+- **Local setup.** `airflow standalone` with the LocalExecutor and a separate Postgres for Airflow
+  metadata. A production deployment would run the scheduler, API server and workers as separate
+  services with real authentication.
+
+## SQL on FHIR
+
+`fhir/sof_duckdb/` compiles [SQL on FHIR v2](https://sql-on-fhir.org/) `ViewDefinition`s into DuckDB
+SQL, so the views run inside the lakehouse on the raw FHIR JSON in bronze.
+
+- **How it compiles.** Every FHIRPath expression becomes a DuckDB expression of type `JSON[]` (a
+  FHIRPath collection). Each `select` becomes a list of JSON rows: `forEach` maps over a collection,
+  `unionAll` concatenates lists and nested selects are combined with a cartesian product. The query
+  then unnests the rows of each resource and projects the columns. Everything is an expression over
+  the resource, with no joins, because DuckDB does not allow subqueries inside lambdas.
+- **Conformance.** `make conformance` runs the specification's shared test suite
+  ([sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js), pinned to commit `0821b67`) and
+  compares results the way the reference runner does. Not supported: `lowBoundary()` and
+  `highBoundary()` (experimental). `repeat` is unrolled to 10 levels.
+- **dbt integration.** `make views` turns each file in `fhir/view_definitions/` into a dbt macro that
+  takes the relation holding the resources, so one view runs over any source:
+  `select * from {{ vd_eob_summary(ref('fhir_explanation_of_benefit')) }}`. The generated macros are
+  committed; Airflow's `views_check` task fails if they are out of date.
+
+Four views are defined: `patient_demographics`, `coverage_summary`, `eob_summary` and `eob_items`.
+
+## Legacy data as FHIR
+
+The gold models `fhir_patient`, `fhir_coverage` and `fhir_explanation_of_benefit` turn the legacy
+warehouse into FHIR R4 resources aligned with the
+[CARIN Blue Button](https://hl7.org/fhir/us/carin-bb/) profiles, an implementation guide CMS
+recommends for the Patient Access API. "Aligned" means they carry the elements those profiles center on
+(identifiers, coverage, claim type, adjudication amounts); they are validated against base FHIR R4,
+not against the CARIN profiles.
+
+- **Nothing invented.** Legacy gender codes outside M/F/U are omitted rather than mapped to a guess,
+  and FHIR's rule against null values and empty arrays is enforced when the JSON is built.
+- **Integrity gate.** An ExplanationOfBenefit requires a patient and a coverage, so claims with an
+  unknown member or outside the member's coverage are not exported; they stay flagged in
+  `gold.fct_claims`.
+- **Round trips.** `gold.fhir_view_parity` runs the ViewDefinitions over the legacy-derived
+  resources and compares the result with the gold tables they came from, row by row. It also
+  compares the `patient_demographics` view over Synthea with the hand-written `stg_fhir__patients`.
+  A dbt test fails if any comparison finds a row on only one side.
+- **Validation.** `make fhir-validate` runs the official HL7 FHIR validator (6.10.4) on a
+  reproducible sample. Terminology is not checked (`-tx n/a`): the validator checks structure,
+  cardinality, data types, required value sets and invariants, but not whether CPT or ICD-10-CM
+  codes exist.

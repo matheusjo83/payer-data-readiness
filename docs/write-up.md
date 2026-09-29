@@ -33,10 +33,11 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   time. Claude Code wrote the code; ran the tests, reconciliations and validations; and found and
   diagnosed the problems described in the write-up. Matheus decided how to handle the eligibility
   artifact. He supervised by reading Claude Code's explanations and summaries at each step.
-- **Documentation.** Claude Code drafted the README's Results section and the sections added from
-  Phase 2 on, the technical write-up and the migration checklist, in the language, format and voice
-  Matheus chose. Matheus reviewed the drafts and checked facts independently, including whether CMS
-  requires or recommends the CARIN Blue Button guide.
+- **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
+  README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
+  write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
+  reviewed the drafts and checked facts independently, including whether CMS requires or
+  recommends the CARIN Blue Button guide.
 - **Git history.** Matheus made the commits and merged the pull requests, so git lists him as the
   author of every commit. Commit authorship records who committed a change, not who wrote the code.
 
@@ -343,6 +344,7 @@ make up && make seed && make synthea && make ingest && make dbt
 make coverage conformance fhir-validate
 ```
 
-Requirements, the CDC streaming demo and the Airflow setup are in the repository's README. A
+Requirements and the CDC streaming demo are in the repository's README, and the Airflow setup is
+in [architecture](architecture.md#orchestration). A
 companion [migration checklist](migration-checklist.md) turns the practices above into steps you can
 apply to another legacy migration.
