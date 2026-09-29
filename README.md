@@ -21,6 +21,10 @@ This project demonstrates the data layer underneath those APIs:
 4. **Bridge to FHIR**: flatten FHIR resources into analytics-ready tables using the
    [SQL on FHIR v2](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/) `ViewDefinition` specification.
 
+**Read more:** the [technical write-up](docs/write-up.md) covers the design decisions, results and
+limitations, and the [migration checklist](docs/migration-checklist.md) turns them into steps for
+other legacy migrations.
+
 ## Architecture
 
 ```
@@ -176,8 +180,8 @@ Four views are defined: `patient_demographics`, `coverage_summary`, `eob_summary
 
 The gold models `fhir_patient`, `fhir_coverage` and `fhir_explanation_of_benefit` turn the legacy
 warehouse into FHIR R4 resources aligned with the
-[CARIN Blue Button](https://hl7.org/fhir/us/carin-bb/) profiles, the implementation guide CMS
-requires for the Patient Access API. "Aligned" means they carry the elements those profiles center on
+[CARIN Blue Button](https://hl7.org/fhir/us/carin-bb/) profiles, an implementation guide CMS
+recommends for the Patient Access API. "Aligned" means they carry the elements those profiles center on
 (identifiers, coverage, claim type, adjudication amounts); they are validated against base FHIR R4,
 not against the CARIN profiles.
 
@@ -383,7 +387,7 @@ by default, so a new run gives similar but not identical numbers.
 - [x] **Phase 2 – Ingestion:** change data capture from the legacy database and latency metrics
 - [x] **Phase 3 – Modeling:** complete silver/gold layers (eligibility, providers, plans), Airflow orchestration
 - [x] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
-- [ ] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
+- [x] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
 
 ## Project structure
 
@@ -394,6 +398,7 @@ ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR) with load 
 dbt/           Silver and gold models, tests, lineage
 airflow/       Airflow image and DAGs
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation
+docs/          Technical write-up and migration checklist
 ```
 
 ## Author
