@@ -43,6 +43,10 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   time. Claude Code wrote the code; ran the tests, reconciliations and validations; and found and
   diagnosed the problems described in the write-up. Matheus decided how to handle the eligibility
   artifact. He supervised by reading Claude Code's explanations and summaries at each step.
+- **After Phase 5** (reproducibility pinning, metric fixes, continuous integration and Phase 6,
+  profile conformance) the work was done the same way, by Claude Code under Matheus's supervision,
+  including changes to the legacy generator Matheus wrote in Phase 1. In Phase 6, Matheus chose
+  how to handle the fields the legacy source lacked, the invalid gender codes and the references.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -93,13 +97,17 @@ make coverage  # documentation and test coverage of the dbt models
 make docs      # browse models and the lineage graph
 ```
 
-FHIR (Phase 4):
+FHIR (Phases 4 and 6):
 
 ```bash
-make conformance    # run the official SQL on FHIR v2 test suite against the view compiler
-make views          # recompile fhir/view_definitions/*.json into dbt macros (after editing a view)
-make fhir-validate  # validate a sample of the legacy-derived FHIR resources (HL7 validator, Java)
+make conformance          # run the official SQL on FHIR v2 test suite against the view compiler
+make views                # recompile fhir/view_definitions/*.json into dbt macros (after editing a view)
+make fhir-validate-carin  # validate a sample against the CARIN Blue Button 2.1.0 profiles (HL7 validator, Java)
+make fhir-validate        # validate a sample against base FHIR R4 only
 ```
+
+The legacy schema gained columns in Phase 6. A database created before that needs `make reset`
+(which deletes the local data) and the Quickstart again.
 
 To watch change data capture at work, run the loader and the activity simulator side by side,
 then rebuild the models:
@@ -116,8 +124,9 @@ in the middle of a write; stopping `make cdc` first avoids that.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed synthea ingest dbt
-conformance fhir-validate` on a clean runner. The run fails if a model or data test fails, if any
-shareable SQL on FHIR test fails, or if the HL7 validator reports an error in the sample.
+conformance fhir-validate-carin` on a clean runner. The run fails if a model or data test fails, if
+any shareable SQL on FHIR test fails, or if the HL7 validator reports an error against the CARIN
+Blue Button profiles in the sample.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -133,7 +142,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | Change data capture | 640 streamed changes, median latency 2.16 s with 5-second polling; rebuilt state matched the source row for row |
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
-| FHIR validation     | 0 errors on a 600-resource sample (base FHIR R4, terminology not checked)                        |
+| FHIR validation     | 0 errors on a 1,400-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved (terminology not checked); 1,000 of 1,000 failed before remediation |
 
 ## Roadmap
 
@@ -142,6 +151,8 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Phase 3 – Modeling:** complete silver/gold layers (eligibility, providers, plans), Airflow orchestration
 - [x] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
 - [x] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
+- [x] **Phase 6 – Profile conformance:** CARIN Blue Button 2.1.0 profiles (baseline, remediation, Organization resources, reference checks), validated in CI
+- [ ] **Phase 7 – Identity resolution:** match the same person arriving through different feeds, before the data reaches the API
 
 ## Project structure
 
@@ -151,7 +162,7 @@ scripts/       Synthea download and configuration, dbt coverage report
 ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR) with load logging
 dbt/           Silver and gold models, tests, lineage
 airflow/       Airflow image and DAGs
-fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation
+fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base and CARIN)
 docs/          Technical write-up, migration checklist, architecture details and results
 .github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request)
 ```

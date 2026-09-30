@@ -74,6 +74,27 @@ models:
         description: Total billed amount (header).
       - name: total_paid
         description: Total paid amount (header).
+      - name: network_status
+        description: in_network or out_of_network (billing provider's network status for this claim).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['in_network', 'out_of_network']
+      - name: type_of_bill
+        description: Institutional claims only. NUBC type of bill (0111 inpatient, 0131 outpatient).
+      - name: institutional_setting
+        description: inpatient or outpatient, from the type of bill. Null for other claim types.
+      - name: place_of_service_code
+        description: Professional claims only. CMS place of service code.
+      - name: days_supply
+        description: Pharmacy claims only. Days supply dispensed.
+      - name: dispense_as_written_code
+        description: Pharmacy claims only. NCPDP dispense as written (DAW) code.
+      - name: refill_number
+        description: Pharmacy claims only. Refill number (0 = original fill).
+      - name: refills_authorized
+        description: Pharmacy claims only. Number of refills authorized.
       - name: updated_at
         description: "{{ doc('updated_at') }}"
 
@@ -93,7 +114,11 @@ models:
         description: Line number within the claim.
         data_tests: [not_null]
       - name: procedure_code
-        description: Procedure code (CPT/HCPCS).
+        description: Procedure code (CPT/HCPCS). Empty on pharmacy lines, which carry an NDC.
+      - name: ndc_code
+        description: Pharmacy lines only. National Drug Code (real NDCs of common generics, 11-digit form).
+      - name: revenue_code
+        description: Institutional lines only. NUBC revenue code.
       - name: diagnosis_code
         description: Diagnosis code (ICD-10-CM).
       - name: units
@@ -192,9 +217,16 @@ models:
         description: National Provider Identifier.
         data_tests: [unique, not_null]
       - name: npi_format_valid
+        description: True when the NPI has exactly 10 digits.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+              config: {severity: warn}
+      - name: npi_valid
         description: >
-          True when the NPI has exactly 10 digits. The check digit is not validated,
-          because the synthetic generator does not produce valid check digits.
+          True when the NPI has 10 digits and a valid check digit (Luhn algorithm over the
+          '80840' prefix). Only valid NPIs are exported to FHIR.
         data_tests:
           - accepted_values:
               arguments:
@@ -212,3 +244,5 @@ models:
                          'orthopedics', 'radiology', 'emergency_medicine', 'obstetrics_gynecology']
       - name: state
         description: Two-letter state code.
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"

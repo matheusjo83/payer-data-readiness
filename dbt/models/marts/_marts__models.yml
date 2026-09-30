@@ -29,6 +29,22 @@ models:
         description: Total billed amount (header).
       - name: total_paid
         description: Total paid amount (header).
+      - name: network_status
+        description: in_network or out_of_network.
+      - name: type_of_bill
+        description: Institutional claims only. NUBC type of bill.
+      - name: institutional_setting
+        description: inpatient or outpatient (institutional claims only), from the type of bill.
+      - name: place_of_service_code
+        description: Professional claims only. CMS place of service code.
+      - name: days_supply
+        description: Pharmacy claims only. Days supply dispensed.
+      - name: dispense_as_written_code
+        description: Pharmacy claims only. NCPDP dispense as written (DAW) code.
+      - name: refill_number
+        description: Pharmacy claims only. Refill number (0 = original fill).
+      - name: refills_authorized
+        description: Pharmacy claims only. Number of refills authorized.
       - name: updated_at
         description: "{{ doc('updated_at') }}"
       - name: line_count
@@ -134,6 +150,8 @@ models:
         description: ZIP code.
       - name: state
         description: Two-letter state code.
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
       - name: had_duplicates
         description: True when the legacy member master had more than one row for this member.
       - name: current_plan_id
@@ -172,13 +190,17 @@ models:
       - name: npi
         description: National Provider Identifier.
       - name: npi_format_valid
-        description: True when the NPI has exactly 10 digits (check digit not validated).
+        description: True when the NPI has exactly 10 digits.
+      - name: npi_valid
+        description: True when the NPI has 10 digits and a valid check digit (Luhn).
       - name: provider_name
         description: Provider or clinic name.
       - name: specialty
         description: Decoded specialty.
       - name: state
         description: Two-letter state code.
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
 
   - name: dq_issue_summary
     description: >

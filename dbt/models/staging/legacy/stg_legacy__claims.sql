@@ -19,5 +19,19 @@ select
     end                                                as claim_status,
     tot_chrg_amt                                       as total_charged,
     tot_pd_amt                                         as total_paid,
+    case ntwk_cd
+        when 'I' then 'in_network'
+        when 'O' then 'out_of_network'
+    end                                                as network_status,
+    bill_typ_cd                                        as type_of_bill,
+    case
+        when bill_typ_cd like '011%' then 'inpatient'
+        when bill_typ_cd like '013%' then 'outpatient'
+    end                                                as institutional_setting,
+    pos_cd                                             as place_of_service_code,
+    days_sply                                          as days_supply,
+    daw_cd                                             as dispense_as_written_code,
+    rfl_nbr                                            as refill_number,
+    rfl_auth                                           as refills_authorized,
     upd_ts                                             as updated_at
 from {{ legacy_current_state('clm_hdr', ['clm_id']) }}

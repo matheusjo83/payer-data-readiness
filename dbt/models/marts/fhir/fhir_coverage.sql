@@ -1,11 +1,13 @@
--- Legacy coverage spans as FHIR R4 Coverage resources, aligned with the CARIN
--- Blue Button Coverage profile (beneficiary, relationship, period, payor, plan
--- class). Nulls are stripped as described in fhir_patient.sql.
+-- Legacy coverage spans as FHIR R4 Coverage resources conforming to the CARIN
+-- Blue Button Coverage profile (STU 2.1.0): beneficiary, relationship, period,
+-- payor (the payer Organization in fhir_organization) and plan class. Nulls are
+-- stripped as described in fhir_patient.sql.
 select
     'cov-' || e.eligibility_id as id,
     json_merge_patch('{}', json_object(
         'resourceType', 'Coverage',
         'id', 'cov-' || e.eligibility_id,
+        'meta', {{ carin_meta('C4BB-Coverage', 'e.updated_at') }},
         'status', 'active',
         'type', json_object('text', p.line_of_business),
         'subscriberId', e.member_id,
@@ -16,7 +18,7 @@ select
         'period', json_object(
             'start', strftime(e.coverage_start_date, '%Y-%m-%d'),
             'end', strftime(e.coverage_end_date, '%Y-%m-%d')),
-        'payor', json_array(json_object('display', 'Payer Data Readiness (synthetic)')),
+        'payor', json_array(json_object('reference', 'Organization/payer')),
         'class', json_array(json_merge_patch('{}', json_object(
             'type', json_object('coding', json_array(json_object(
                 'system', 'http://terminology.hl7.org/CodeSystem/coverage-class',

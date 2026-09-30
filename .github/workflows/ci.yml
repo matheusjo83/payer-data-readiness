@@ -1,7 +1,7 @@
 # Runs the Quickstart end to end on synthetic data and fails if any gate fails:
 # dbt build (models and data tests), the SQL on FHIR v2 test suite (shareable
-# tests) and the HL7 FHIR validator (base FHIR R4, no terminology) on a sample
-# of the legacy-derived resources.
+# tests) and the HL7 FHIR validator on a sample of the legacy-derived resources
+# against the CARIN Blue Button 2.1.0 profiles (no terminology server).
 name: CI
 
 on:
@@ -69,8 +69,8 @@ jobs:
       - name: SQL on FHIR conformance
         run: make conformance
 
-      - name: FHIR validation
-        run: make fhir-validate
+      - name: FHIR validation (CARIN Blue Button 2.1.0)
+        run: make fhir-validate-carin
 
       - name: Upload reports
         if: always()
@@ -80,8 +80,8 @@ jobs:
           if-no-files-found: ignore
           path: |
             data/sof_conformance.json
-            data/fhir_validation/summary.json
-            data/fhir_validation/validator.log
+            data/fhir_validation_carin-bb/summary.json
+            data/fhir_validation_carin-bb/validator.log
             dbt/target/run_results.json
 
       - name: Stop legacy database

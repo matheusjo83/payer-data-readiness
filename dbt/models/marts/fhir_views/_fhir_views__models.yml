@@ -84,7 +84,7 @@ models:
         description: EOB.item.sequence.
         data_tests: [not_null]
       - name: product_system
-        description: Code system of EOB.item.productOrService (CPT for legacy, SNOMED CT for Synthea).
+        description: Code system of EOB.item.productOrService (CPT, or NDC for pharmacy, for legacy; SNOMED CT for Synthea).
       - name: product_code
         description: Code of EOB.item.productOrService.
       - name: serviced_start

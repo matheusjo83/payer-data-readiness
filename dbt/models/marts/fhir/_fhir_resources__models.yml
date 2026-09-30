@@ -3,8 +3,8 @@ version: 2
 models:
   - name: fhir_patient
     description: >
-      Legacy members as FHIR R4 Patient resources (JSON), aligned with the CARIN Blue Button
-      Patient profile. Legacy gender codes outside M/F/U are omitted.
+      Legacy members as FHIR R4 Patient resources (JSON) conforming to the CARIN Blue Button
+      Patient profile (STU 2.1.0). Legacy gender codes outside M/F/U become 'unknown'.
     columns:
       - name: id
         description: Patient.id (legacy member ID).
@@ -15,8 +15,8 @@ models:
 
   - name: fhir_coverage
     description: >
-      Legacy coverage spans as FHIR R4 Coverage resources (JSON), aligned with the CARIN Blue
-      Button Coverage profile.
+      Legacy coverage spans as FHIR R4 Coverage resources (JSON) conforming to the CARIN Blue
+      Button Coverage profile (STU 2.1.0).
     columns:
       - name: id
         description: Coverage.id ('cov-' + legacy eligibility key).
@@ -27,13 +27,25 @@ models:
 
   - name: fhir_explanation_of_benefit
     description: >
-      Legacy claims as FHIR R4 ExplanationOfBenefit resources (JSON), aligned with the CARIN
-      Blue Button EOB profiles. Only claims with a known member and a coverage span on the
-      service date are exported.
+      Legacy claims as FHIR R4 ExplanationOfBenefit resources (JSON) conforming to the CARIN
+      Blue Button EOB profiles (STU 2.1.0) for their claim type and setting. Only claims with a
+      known member and a coverage span on the service date are exported.
     columns:
       - name: id
         description: ExplanationOfBenefit.id (legacy claim ID).
         data_tests: [unique, not_null]
       - name: resource
         description: The FHIR ExplanationOfBenefit resource as JSON, without null values.
+        data_tests: [not_null]
+
+  - name: fhir_organization
+    description: >
+      Organizations referenced by the other FHIR resources, conforming to the CARIN Blue Button
+      Organization profile (STU 2.1.0): the payer and the legacy providers (clinics).
+    columns:
+      - name: id
+        description: Organization.id ('payer', or the legacy provider ID).
+        data_tests: [unique, not_null]
+      - name: resource
+        description: The FHIR Organization resource as JSON, without null values.
         data_tests: [not_null]

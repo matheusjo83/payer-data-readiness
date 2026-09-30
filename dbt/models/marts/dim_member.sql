@@ -19,6 +19,7 @@ select
     m.zip_code,
     m.state,
     m.had_duplicates,
+    m.updated_at,
     e.plan_id                                   as current_plan_id,
     p.line_of_business                          as current_line_of_business,
     e.coverage_start_date,

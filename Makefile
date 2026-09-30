@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed synthea ingest cdc changes views conformance dbt coverage fhir-validate docs airflow-up airflow-down all
+.PHONY: up down reset seed synthea ingest cdc changes views conformance dbt coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
@@ -47,8 +47,11 @@ airflow-up:   ## Build and start Airflow (UI at http://localhost:8080)
 airflow-down: ## Stop Airflow (the legacy database keeps running)
 	docker compose --profile airflow stop airflow airflow-db
 
-fhir-validate: ## Validate a sample of the legacy-derived FHIR resources with the HL7 validator (Java)
+fhir-validate: ## Validate a sample of the legacy-derived FHIR resources against base FHIR R4 (Java)
 	$(PY) fhir/validate.py
+
+fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0 profiles, with references resolved (Java)
+	$(PY) fhir/validate.py --ig carin-bb --top 60
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

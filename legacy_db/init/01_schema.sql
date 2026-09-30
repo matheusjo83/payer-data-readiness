@@ -39,7 +39,8 @@ CREATE TABLE prv (                -- providers
     npi         VARCHAR(10),
     prv_nm      VARCHAR(80),
     spclty_cd   VARCHAR(4),
-    st_cd       CHAR(2)
+    st_cd       CHAR(2),
+    upd_ts      TIMESTAMP
 );
 
 CREATE TABLE clm_hdr (            -- claim header
@@ -54,6 +55,13 @@ CREATE TABLE clm_hdr (            -- claim header
     clm_stat_cd  CHAR(2),         -- PD paid, DN denied, PN pending, VD void
     tot_chrg_amt NUMERIC(12,2),
     tot_pd_amt   NUMERIC(12,2),
+    ntwk_cd      CHAR(1),         -- I in network, O out of network
+    bill_typ_cd  VARCHAR(4),      -- institutional: type of bill (0111 inpatient, 0131 outpatient)
+    pos_cd       CHAR(2),         -- professional: CMS place of service
+    days_sply    INTEGER,         -- pharmacy: days supply
+    daw_cd       CHAR(1),         -- pharmacy: NCPDP dispense as written code
+    rfl_nbr      INTEGER,         -- pharmacy: refill number (0 = original fill)
+    rfl_auth     INTEGER,         -- pharmacy: refills authorized
     upd_ts       TIMESTAMP
 );
 
@@ -65,6 +73,8 @@ CREATE TABLE clm_ln (             -- claim lines (no FK to header!)
     units       INTEGER,
     chrg_amt    NUMERIC(12,2),
     pd_amt      NUMERIC(12,2),
+    ndc_cd      VARCHAR(11),      -- pharmacy: NDC (proc_cd is empty)
+    rev_cd      VARCHAR(4),       -- institutional: NUBC revenue code
     upd_ts      TIMESTAMP,
     PRIMARY KEY (clm_id, ln_nbr)
 );

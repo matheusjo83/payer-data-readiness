@@ -1,6 +1,7 @@
 """Generate synthetic legacy payer data with deliberate data-quality issues.
 
-All data is fictitious. Issues are injected at known rates so that the
+All member, provider and claim data is fictitious (the drug codes are real NDCs,
+see claim_details.py). Issues are injected at known rates so that the
 lakehouse quality checks can later measure (and prove) that they were caught.
 
 Dates are anchored to a reference date (--as-of) instead of the day the script
@@ -19,6 +20,8 @@ import time
 from datetime import date, datetime, timedelta
 
 import psycopg
+
+from claim_details import claim_details
 
 # Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
 PG_DSN = os.environ.get(
@@ -55,10 +58,22 @@ PROC_CODES = ["99213", "99214", "99203", "80053", "85025", "71046", "93000",
               "97110", "36415", "99285"]
 DX_CODES = ["E11.9", "I10", "J06.9", "M54.5", "Z00.00", "E78.5", "F41.1",
             "K21.9", "J45.909", "N39.0"]
+# Column order of the dicts returned by claim_details().
+CLAIM_DETAIL_COLS = ["ntwk_cd", "bill_typ_cd", "pos_cd", "days_sply", "daw_cd", "rfl_nbr", "rfl_auth"]
+LINE_DETAIL_COLS = ["ndc_cd", "rev_cd"]
 
 
 def ymd(d: date) -> str:
     return d.strftime("%Y%m%d")
+
+
+def npi_with_check_digit(base9: str) -> str:
+    """Complete a 9-digit NPI base with its Luhn check digit (computed over the 80840 prefix)."""
+    total = 0
+    for i, ch in enumerate(reversed("80840" + base9)):
+        d = int(ch) * (2 if i % 2 == 0 else 1)
+        total += d - 9 if d > 9 else d
+    return base9 + str((10 - total % 10) % 10)
 
 
 def rand_date(start: date, end: date) -> date:
@@ -93,6 +108,9 @@ def main() -> None:
                          f"(default: {DEFAULT_AS_OF})")
     args = ap.parse_args()
     random.seed(args.seed)
+    # Claim details (claim_details.py) come from their own generator, so the
+    # sequence of the original columns does not depend on them.
+    detail_rng = random.Random(args.seed + 1)
 
     # "Now" is midnight at the start of the reference date.
     today = args.as_of
@@ -134,9 +152,10 @@ def main() -> None:
     # Providers
     providers = []
     for i in range(args.providers):
-        providers.append((f"P{i + 1:07d}", f"{random.randint(10**9, 2 * 10**9 - 1)}",
-                          f"{random.choice(LAST)} Clinic {i + 1}",
-                          random.choice(SPECIALTIES), random.choice(STATES)))
+        # NPIs get a valid check digit (the draw is unchanged; its last digit is replaced).
+        npi = npi_with_check_digit(f"{random.randint(10**9, 2 * 10**9 - 1)}"[:9])
+        providers.append((f"P{i + 1:07d}", npi, f"{random.choice(LAST)} Clinic {i + 1}",
+                          random.choice(SPECIALTIES), random.choice(STATES), now))
     provider_ids = [p[0] for p in providers]
 
     # Claims + lines
@@ -160,25 +179,33 @@ def main() -> None:
         adj = "" if status == "PN" else ymd(rcvd + timedelta(days=random.randint(1, 20)))
         n_lines = random.randint(1, 4)
         tot_chrg = tot_pd = 0.0
+        claim_lines = []
         for ln in range(1, n_lines + 1):
             chrg = round(random.uniform(40, 1500), 2)
             pd = 0.0 if status in ("DN", "PN", "VD") else round(chrg * random.uniform(0.3, 0.9), 2)
             tot_chrg += chrg
             tot_pd += pd
-            lines.append((cid, ln, random.choice(PROC_CODES), random.choice(DX_CODES),
-                          random.randint(1, 3), chrg, pd, now))
+            claim_lines.append([cid, ln, random.choice(PROC_CODES), random.choice(DX_CODES),
+                                random.randint(1, 3), chrg, pd])
         if status == "PD" and random.random() < RATE_PAID_GT_CHARGED:
             tot_pd = tot_chrg * random.uniform(1.05, 1.5)
-        claims.append((cid, mid, random.choice(provider_ids),
-                       random.choices(["P", "I", "R"], [70, 20, 10])[0],
-                       ymd(svc), ymd(svc + timedelta(days=random.randint(0, 3))),
-                       ymd(rcvd), adj, status, round(tot_chrg, 2), round(tot_pd, 2), now))
+        prv_id = random.choice(provider_ids)
+        claim_type = random.choices(["P", "I", "R"], [70, 20, 10])[0]
+        svc_to = svc + timedelta(days=random.randint(0, 3))
+        header, line_details = claim_details(detail_rng, claim_type, svc, svc_to, n_lines)
+        claims.append((cid, mid, prv_id, claim_type, ymd(svc), ymd(svc_to),
+                       ymd(rcvd), adj, status, round(tot_chrg, 2), round(tot_pd, 2),
+                       *(header[c] for c in CLAIM_DETAIL_COLS), now))
+        for line, details in zip(claim_lines, line_details):
+            if claim_type == "R":
+                line[2] = None   # pharmacy lines carry an NDC instead of a procedure code
+            lines.append((*line, *(details[c] for c in LINE_DETAIL_COLS), now))
 
     # Orphan claim lines (header does not exist)
     n_orphans = int(len(lines) * RATE_ORPHAN_LINE)
     for i in range(n_orphans):
         lines.append((f"C9{i:011d}", 1, random.choice(PROC_CODES), random.choice(DX_CODES),
-                      1, 100.0, 0.0, now))
+                      1, 100.0, 0.0, None, None, now))
 
     # Prior authorizations (decision time feeds the CMS-0057-F timeliness metric)
     pas = []
@@ -200,12 +227,12 @@ def main() -> None:
         copy_rows(cur, "mbr_mstr", ["mbr_id", "fst_nm", "lst_nm", "dob", "gndr_cd",
                                     "zip_cd", "st_cd", "upd_ts"], members)
         copy_rows(cur, "elig_span", ["mbr_id", "pln_id", "eff_dt", "term_dt", "upd_ts"], elig)
-        copy_rows(cur, "prv", ["prv_id", "npi", "prv_nm", "spclty_cd", "st_cd"], providers)
+        copy_rows(cur, "prv", ["prv_id", "npi", "prv_nm", "spclty_cd", "st_cd", "upd_ts"], providers)
         copy_rows(cur, "clm_hdr", ["clm_id", "mbr_id", "prv_id", "clm_typ_cd", "svc_from_dt",
                                    "svc_to_dt", "rcvd_dt", "adj_dt", "clm_stat_cd",
-                                   "tot_chrg_amt", "tot_pd_amt", "upd_ts"], claims)
+                                   "tot_chrg_amt", "tot_pd_amt", *CLAIM_DETAIL_COLS, "upd_ts"], claims)
         copy_rows(cur, "clm_ln", ["clm_id", "ln_nbr", "proc_cd", "dx_cd", "units",
-                                  "chrg_amt", "pd_amt", "upd_ts"], lines)
+                                  "chrg_amt", "pd_amt", *LINE_DETAIL_COLS, "upd_ts"], lines)
         copy_rows(cur, "pa_req", ["pa_id", "mbr_id", "prv_id", "svc_cd", "urgnt_flg",
                                   "req_ts", "dcsn_ts", "dcsn_cd", "upd_ts"], pas)
         conn.commit()
