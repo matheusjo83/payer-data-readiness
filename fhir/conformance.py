@@ -9,6 +9,9 @@ running the view fails.
 Usage (from the repository root):
     python fhir/conformance.py              # summary per file, writes data/sof_conformance.json
     python fhir/conformance.py -v           # also list failing tests
+
+Exits with status 1 if any shareable test fails (experimental tests are reported
+but do not fail the run).
 """
 
 import argparse
@@ -117,6 +120,8 @@ def main() -> None:
         for f in report["failures"]:
             print(f"FAIL [{f['tag']}] {f['file']} :: {f['test']} -> {f['detail']}")
     print(f"Report written to {REPORT}")
+    if totals[("shareable", False)]:
+        sys.exit(f"{totals[('shareable', False)]} shareable test(s) failed")
 
 
 if __name__ == "__main__":
