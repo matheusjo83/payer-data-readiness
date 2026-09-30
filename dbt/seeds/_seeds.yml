@@ -1,0 +1,15 @@
+version: 2
+
+seeds:
+  - name: first_name_nicknames
+    description: >
+      Common English and Spanish nicknames with the formal first name they stand for, used to
+      compare first names in identity resolution. It covers the nicknames the synthetic PBM
+      generator uses (and a few more), so its benefit on this data is an upper bound.
+    columns:
+      - name: nickname
+        description: Nickname, lower case.
+        data_tests: [unique, not_null]
+      - name: first_name
+        description: Formal first name, lower case.
+        data_tests: [not_null]

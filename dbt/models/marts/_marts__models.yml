@@ -132,6 +132,57 @@ models:
         description: First day of the covered calendar month.
         data_tests: [not_null]
 
+  - name: fct_pbm_claims
+    description: >
+      PBM pharmacy claims with the member resolved through gold.member_xref and the coverage span
+      on the fill date. Only claims with a linked member and coverage are exported to FHIR.
+    columns:
+      - name: rx_claim_id
+        description: PBM claim ID.
+        data_tests: [unique, not_null]
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+      - name: fill_date
+        description: Date the prescription was filled.
+      - name: ndc_code
+        description: National Drug Code (11-digit form).
+      - name: quantity
+        description: Quantity dispensed.
+      - name: days_supply
+        description: Days supply dispensed.
+      - name: dispense_as_written_code
+        description: NCPDP dispense as written (DAW) code.
+      - name: refill_number
+        description: Refill number (0 = original fill).
+      - name: refills_authorized
+        description: Number of refills authorized.
+      - name: pharmacy_id
+        description: Dispensing pharmacy.
+      - name: network_status
+        description: in_network or out_of_network.
+      - name: ingredient_cost
+        description: Submitted ingredient cost.
+      - name: patient_pay
+        description: Amount paid by the patient.
+      - name: plan_paid
+        description: Amount paid by the plan.
+      - name: claim_status
+        description: paid or reversed.
+      - name: processed_at
+        description: When the PBM processed the claim.
+      - name: member_id
+        description: Member linked to the cardholder (null unless linked).
+      - name: identity_status
+        description: Status of the cardholder in gold.member_xref (linked, review, unmatched).
+      - name: eligibility_id
+        description: Coverage span in effect on the fill date.
+      - name: plan_id
+        description: Plan of that coverage span.
+      - name: has_linked_member
+        description: True when the cardholder is linked to a member.
+      - name: is_within_eligibility
+        description: True when the linked member had coverage on the fill date. Null when not linked.
+
   - name: dim_member
     description: Deduplicated members with their most recent coverage span and plan.
     columns:

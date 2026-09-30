@@ -43,10 +43,12 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   time. Claude Code wrote the code; ran the tests, reconciliations and validations; and found and
   diagnosed the problems described in the write-up. Matheus decided how to handle the eligibility
   artifact. He supervised by reading Claude Code's explanations and summaries at each step.
-- **After Phase 5** (reproducibility pinning, metric fixes, continuous integration and Phase 6,
-  profile conformance) the work was done the same way, by Claude Code under Matheus's supervision,
-  including changes to the legacy generator Matheus wrote in Phase 1. In Phase 6, Matheus chose
-  how to handle the fields the legacy source lacked, the invalid gender codes and the references.
+- **After Phase 5** (reproducibility pinning, metric fixes, continuous integration, Phase 6,
+  profile conformance, and Phase 7, identity resolution) the work was done the same way, by Claude
+  Code under Matheus's supervision, including changes to the legacy generator Matheus wrote in
+  Phase 1. In Phase 6, Matheus chose how to handle the fields the legacy source lacked, the invalid
+  gender codes and the references; in Phase 7, the second source (a PBM feed), the matching method
+  (Splink compared with a deterministic baseline) and the scope (through FHIR).
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -60,25 +62,27 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
 ```
 Synthea (synthetic FHIR R4) ──── NDJSON load ──┐
                                                ├─► Bronze ─► Silver ─► Gold ─► SQL on FHIR views
-Legacy payer DB (Postgres) ──── CDC (WAL) ─────┘   (raw)    (tested)  (models)  Quality & lineage
-                                (logged)
-          └──────────── orchestrated by Airflow (CDC sync, FHIR load, dbt build, coverage) ─────┘
+Legacy payer DB (Postgres) ──── CDC (WAL) ─────┤   (raw)    (tested)  (models)  Quality & lineage
+                                (logged)       │                      Identity resolution
+PBM files (pipe-delimited) ──── file load ─────┘
+          └──── orchestrated by Airflow (CDC sync, FHIR and PBM loads, dbt build, coverage) ────┘
 ```
 
 | Layer  | Location (DuckDB)         | Contents                                                 |
 |--------|---------------------------|----------------------------------------------------------|
-| Bronze | `bronze.*`                | Legacy change tables (CDC), raw FHIR JSON, load log      |
+| Bronze | `bronze.*`                | Legacy change tables (CDC), raw FHIR JSON, PBM files, load log |
 | Silver | `silver.*` (dbt staging)  | Current state of each source: deduplicated, typed, tested |
-| Gold   | `gold.*` (dbt marts)      | Dimensions, facts, quality scorecard, reliability metrics |
+| Gold   | `gold.*` (dbt marts)      | Dimensions, facts, identity cross-reference, quality scorecard, reliability metrics, FHIR resources |
 
 How each component works (change data capture, orchestration, SQL on FHIR, the legacy-to-FHIR
-mapping) is described in [docs/architecture.md](docs/architecture.md).
+mapping, identity resolution) is described in [docs/architecture.md](docs/architecture.md).
 
 ## Stack
 
 Runs fully local, at zero cost: **Postgres** (legacy source, Docker, with the **wal2json** logical
 decoding plugin for CDC), **DuckDB** (lakehouse engine), **dbt** (transformations, tests, lineage),
-**Synthea** (synthetic FHIR data), **Python** (ingestion), **Apache Airflow** (orchestration, Docker).
+**Synthea** (synthetic FHIR data), **Splink** (probabilistic record linkage), **Python** (ingestion),
+**Apache Airflow** (orchestration, Docker).
 
 ## Quickstart
 
@@ -90,8 +94,9 @@ pip install -r requirements.txt
 
 make up        # build and start the legacy Postgres database
 make seed      # generate legacy data with deliberate quality issues
+make pbm       # generate the PBM feed: the same members under other IDs, with known variations
 make synthea   # generate synthetic FHIR R4 data (bulk NDJSON)
-make ingest    # CDC snapshot of the legacy tables + FHIR load into the bronze layer
+make ingest    # CDC snapshot of the legacy tables + FHIR and PBM loads into the bronze layer
 make dbt       # build silver/gold layers and run data tests
 make coverage  # documentation and test coverage of the dbt models
 make docs      # browse models and the lineage graph
@@ -123,7 +128,7 @@ batch and retries on the next poll if the file is busy, but `make dbt` can still
 in the middle of a write; stopping `make cdc` first avoids that.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed synthea ingest dbt
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed pbm synthea ingest dbt
 conformance fhir-validate-carin` on a clean runner. The run fails if a model or data test fails, if
 any shareable SQL on FHIR test fails, or if the HL7 validator reports an error against the CARIN
 Blue Button profiles in the sample.
@@ -142,6 +147,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | Change data capture | 640 streamed changes, median latency 2.16 s with 5-second polling; rebuilt state matched the source row for row |
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
+| Identity resolution | PBM cardholders linked to members with 100% precision and 98.2% recall against ground truth (deterministic baseline: 99.5% and 93.8%); 69 uncertain matches sent to review |
 | FHIR validation     | 0 errors on a 1,400-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved (terminology not checked); 1,000 of 1,000 failed before remediation |
 
 ## Roadmap
@@ -152,15 +158,15 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Phase 4 – FHIR:** run SQL on FHIR ViewDefinitions, compare with hand-written models, map legacy data to FHIR-aligned outputs
 - [x] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
 - [x] **Phase 6 – Profile conformance:** CARIN Blue Button 2.1.0 profiles (baseline, remediation, Organization resources, reference checks), validated in CI
-- [ ] **Phase 7 – Identity resolution:** match the same person arriving through different feeds, before the data reaches the API
+- [x] **Phase 7 – Identity resolution:** a PBM feed with the same members under other IDs, probabilistic matching (Splink) against a deterministic baseline, measured against ground truth, through to FHIR
 
 ## Project structure
 
 ```
 legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
-scripts/       Synthea download and configuration, dbt coverage report
-ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR) with load logging
-dbt/           Silver and gold models, tests, lineage
+scripts/       Synthea download and configuration, PBM feed generator, dbt coverage report
+ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM) with load logging
+dbt/           Silver and gold models (including the Splink Python model), seeds, tests, lineage
 airflow/       Airflow image and DAGs
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base and CARIN)
 docs/          Technical write-up, migration checklist, architecture details and results

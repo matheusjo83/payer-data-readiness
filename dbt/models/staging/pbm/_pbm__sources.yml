@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: pbm
+    description: >
+      Files from the PBM (pharmacy benefit manager) that administers the pharmacy benefit for part
+      of the members, loaded as received (bronze layer, all columns as text). The PBM issues its own
+      cardholder IDs and does not send the payer's member ID.
+    schema: bronze
+    tables:
+      - name: members
+        identifier: pbm_members
+        description: PBM cardholders with their demographics as the PBM keyed them.
+      - name: pharmacies
+        identifier: pbm_pharmacies
+      - name: claims
+        identifier: pbm_claims
+        description: Pharmacy claims, keyed by cardholder ID.
+      - name: truth
+        identifier: pbm_truth
+        description: >
+          Ground truth from the synthetic generator: the legacy member behind each cardholder, if
+          any, and the variations injected. Read only by gold.identity_match_quality.

@@ -1,6 +1,6 @@
 -- Organizations referenced by the other FHIR resources, as CARIN Blue Button
--- Organization resources: the payer (EOB.insurer, Coverage.payor) and the
--- legacy providers (EOB.provider), which are clinics. The payer is defined by
+-- Organization resources: the payer (EOB.insurer, Coverage.payor), the legacy
+-- providers, which are clinics, and the PBM's pharmacies (EOB.provider). The payer is defined by
 -- this project rather than the legacy source, so its lastUpdated is the
 -- reference date (var as_of_date). Only NPIs with a valid check digit are exported.
 select
@@ -33,3 +33,24 @@ select
             json_array(json_object('state', state, 'country', 'US')) end
     )) as resource
 from {{ ref('dim_provider') }}
+
+union all
+
+select
+    pharmacy_id as id,
+    json_merge_patch('{}', json_object(
+        'resourceType', 'Organization',
+        'id', pharmacy_id,
+        'meta', {{ carin_meta('C4BB-Organization', 'updated_at') }},
+        'identifier', case when npi_valid then json_array(json_object(
+            'type', json_object('coding', json_array(json_object(
+                'system', 'http://terminology.hl7.org/CodeSystem/v2-0203',
+                'code', 'NPI'))),
+            'system', 'http://hl7.org/fhir/sid/us-npi',
+            'value', npi)) end,
+        'active', true,
+        'name', pharmacy_name,
+        'address', case when state is not null then
+            json_array(json_object('state', state, 'country', 'US')) end
+    )) as resource
+from {{ ref('stg_pbm__pharmacies') }}

@@ -4,6 +4,7 @@
 --
 --   synthea_patients  ViewDefinition over Synthea Patient vs. the hand-written stg_fhir__patients
 --   legacy_*          round trip: legacy gold table -> FHIR resource -> ViewDefinition -> back
+--   pbm_*             the same round trip for the PBM claims exported as ExplanationOfBenefit
 {% set comparisons = {
     'synthea_patients': {
         'view': "select patient_id, gender, try_cast(birth_date as date) as birth_date, state, postal_code
@@ -30,7 +31,7 @@
     'legacy_claims': {
         'view': "select eob_id, patient_id, claim_type, item_count,
                         cast(submitted_amount as decimal(12, 2)), cast(paid_amount as decimal(12, 2))
-                 from " ~ ref('vd_legacy__eob_summary'),
+                 from " ~ ref('vd_legacy__eob_summary') ~ " where eob_id not like 'PBM%'",
         'reference': "select claim_id, member_id, claim_type, line_count, total_charged, total_paid
                       from " ~ ref('fct_claims') ~ "
                       where has_known_member and is_within_eligibility",
@@ -38,13 +39,29 @@
     'legacy_claim_lines': {
         'view': "select eob_id, item_sequence, product_code, try_cast(serviced_start as date),
                         cast(net_amount as decimal(12, 2))
-                 from " ~ ref('vd_legacy__eob_items'),
+                 from " ~ ref('vd_legacy__eob_items') ~ " where eob_id not like 'PBM%'",
         'reference': "select l.claim_id, l.line_number,
                              case when c.claim_type = 'pharmacy' then l.ndc_code else l.procedure_code end,
                              c.service_from_date, l.charged_amount
                       from " ~ ref('stg_legacy__claim_lines') ~ " l
                       join " ~ ref('fct_claims') ~ " c using (claim_id)
                       where c.has_known_member and c.is_within_eligibility",
+    },
+    'pbm_claims': {
+        'view': "select eob_id, patient_id, claim_type, item_count,
+                        cast(submitted_amount as decimal(12, 2)), cast(paid_amount as decimal(12, 2))
+                 from " ~ ref('vd_legacy__eob_summary') ~ " where eob_id like 'PBM%'",
+        'reference': "select rx_claim_id, member_id, 'pharmacy', 1, ingredient_cost, plan_paid
+                      from " ~ ref('fct_pbm_claims') ~ "
+                      where has_linked_member and is_within_eligibility",
+    },
+    'pbm_claim_lines': {
+        'view': "select eob_id, item_sequence, product_code, try_cast(serviced_start as date),
+                        cast(net_amount as decimal(12, 2))
+                 from " ~ ref('vd_legacy__eob_items') ~ " where eob_id like 'PBM%'",
+        'reference': "select rx_claim_id, 1, ndc_code, fill_date, ingredient_cost
+                      from " ~ ref('fct_pbm_claims') ~ "
+                      where has_linked_member and is_within_eligibility",
     },
 } %}
 

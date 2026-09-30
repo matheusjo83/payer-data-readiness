@@ -33,10 +33,12 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   time. Claude Code wrote the code; ran the tests, reconciliations and validations; and found and
   diagnosed the problems described in the write-up. Matheus decided how to handle the eligibility
   artifact. He supervised by reading Claude Code's explanations and summaries at each step.
-- **After Phase 5** (reproducibility pinning, metric fixes, continuous integration and Phase 6,
-  profile conformance) the work was done the same way, by Claude Code under Matheus's supervision,
-  including changes to the legacy generator Matheus wrote in Phase 1. In Phase 6, Matheus chose
-  how to handle the fields the legacy source lacked, the invalid gender codes and the references.
+- **After Phase 5** (reproducibility pinning, metric fixes, continuous integration, Phase 6,
+  profile conformance, and Phase 7, identity resolution) the work was done the same way, by Claude
+  Code under Matheus's supervision, including changes to the legacy generator Matheus wrote in
+  Phase 1. In Phase 6, Matheus chose how to handle the fields the legacy source lacked, the invalid
+  gender codes and the references; in Phase 7, the second source (a PBM feed), the matching method
+  (Splink compared with a deterministic baseline) and the scope (through FHIR).
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -66,6 +68,10 @@ work he did himself. Work done by Claude Code is attributed to it.
   source tables with zero differing rows, and the HL7 validator reports zero errors on a
   1,400-resource sample against the CARIN Blue Button 2.1.0 profiles, with references resolved
   (terminology not checked). Before remediation, every sampled resource failed those profiles.
+- **Identity resolution with ground truth.** A PBM feed sends 2,900 of the members under its own
+  IDs, with nicknames, typos, changed names, mistyped birth dates and old addresses, plus 275 people
+  the payer does not know. A Splink model links 2,847 correctly and none wrongly (recall 98.2%) and
+  sends 69 uncertain cases to review; exact rules link 2,719 correctly and 14 wrongly (recall 93.8%).
 
 These figures describe synthetic data generated with a fixed seed. They show that the pipeline
 behaves as designed. They do not describe any real health plan.
@@ -75,19 +81,23 @@ behaves as designed. They do not describe any real health plan.
 ```
 Synthea (synthetic FHIR R4) ──── NDJSON load ──┐
                                                ├─► Bronze ─► Silver ─► Gold ─► SQL on FHIR views
-Legacy payer DB (Postgres) ──── CDC (WAL) ─────┘   (raw)    (tested)  (models)  Quality & lineage
-          └──────────── orchestrated by Airflow (CDC sync, FHIR load, dbt build, coverage) ─────┘
+Legacy payer DB (Postgres) ──── CDC (WAL) ─────┤   (raw)    (tested)  (models)  Quality & lineage
+                                               │                      Identity resolution
+PBM files (pipe-delimited) ──── file load ─────┘
+          └──── orchestrated by Airflow (CDC sync, FHIR and PBM loads, dbt build, coverage) ────┘
 ```
 
 The stack is Postgres for the legacy source (with the wal2json plugin), DuckDB as the lakehouse
-engine, dbt for transformations, tests and lineage, Synthea for synthetic FHIR data, Python for
-ingestion, and Apache Airflow for orchestration. I chose it, with help from Claude Code, so that anyone
+engine, dbt for transformations, tests and lineage, Synthea for synthetic FHIR data, Splink for
+record linkage, Python for ingestion, and Apache Airflow for orchestration. I chose it, with help from Claude Code, so that anyone
 can run the whole project with `make` and Docker, at no cost. The trade-offs of that choice come up throughout, most
 of all DuckDB's single writer.
 
 It was built in five phases, each merged as its own pull request: foundation, change data capture,
 modeling and orchestration, FHIR, and this write-up. I wrote the first phase; Claude Code implemented
-phases 2 to 4 and drafted this write-up.
+phases 2 to 4 and drafted this write-up. Later pull requests pinned the generators, added continuous
+integration, and added two phases: conformance to the CARIN Blue Button profiles (Phase 6) and
+identity resolution across two sources (Phase 7).
 
 ## A legacy source you can measure against
 
@@ -355,6 +365,58 @@ same zero errors as the local run but different warning counts. The "reproducibl
 reservoir sample with a fixed seed, depended on the physical order of the rows, and dbt writes the
 rows in a different order on each build. The sample is now chosen by a hash of the resource ID.
 
+## Identity resolution
+
+A comment on the project noted that validation can say a Patient is well formed, but not that it
+is the same person as the one arriving through another feed. That is identity resolution, and it
+belongs in the data layer, before anything reaches the API. The project had no such case: the
+legacy members and the Synthea patients are separate populations. So Phase 7 created one, the
+same way Phase 1 created the data-quality issues: on purpose, at documented rates, with a record
+of the truth.
+
+Claude Code presented three decisions, and I chose its recommendation each time:
+
+- **The second source.** A pharmacy benefit manager (PBM) that issues its own cardholder IDs and
+  sends members, pharmacies and pharmacy claims in pipe-delimited files, a common arrangement for
+  payers. Its generator takes 60% of the covered members and varies their records (nicknames,
+  typos, a changed last name, transposed or mistyped birth dates, old addresses, missing fields),
+  then adds unrelated people and deliberate look-alikes. It has its own random generator and only
+  reads the legacy data, so no published figure changed.
+- **The method.** Splink, a probabilistic (Fellegi-Sunter) record linkage library that runs on
+  DuckDB, compared with a deterministic baseline, so the gain is measured rather than assumed. The
+  model runs as a dbt Python model, inside the lineage, and is trained without labels; the ground
+  truth is read only by the model that scores the results.
+- **The scope.** Through FHIR: a linked member's Patient carries the PBM cardholder ID, and the PBM
+  claims become ExplanationOfBenefit resources that reference that Patient, validated by the same
+  CARIN gate as the rest.
+
+The first model made the error master patient indexes are known for. It linked nine "twins" (same
+last name, birth date and ZIP code, different first name) with match probabilities above 0.99.
+Nicknames and typos had taught it that differing first names are not rare among true matches, so
+the disagreement cost little. The exact rules did the same: all 14 of their false positives were
+the twins. Two changes followed. A nickname level in the first-name comparison, through a small
+dictionary, which raised the correct links. And a guard: no automatic link when the first names
+disagree completely; the case goes to a review queue with both records side by side. The guard
+costs ten true matches that now wait for review, and it removed every wrong link.
+
+| Method        | Linked correctly | Linked wrongly | Not linked | In review | Precision | Recall  |
+|---------------|-----------------:|---------------:|-----------:|----------:|----------:|--------:|
+| Deterministic |            2,719 |             14 |        181 |         — |    99.49% |  93.76% |
+| Splink        |            2,847 |              0 |         53 |        69 |   100.00% |  98.17% |
+
+The breakdown by variation shows where the gain comes from. The exact rules find none of the 142
+members whose birth date is transposed, mistyped, missing or invalid in the legacy source, because
+every rule requires the birth date; Splink finds 77% to 90% of them. A test now fails the build if
+an automatic link is wrong or recall falls below 95%, and it fails when pointed at the baseline.
+
+The PBM claims then follow the members: 4,573 of 5,141 become ExplanationOfBenefit resources.
+The other 568 wait, flagged, because their cardholder is in review or unmatched (529) or the member
+had no coverage on the fill date (39).
+
+One more reproducibility detail surfaced here. Splink's scores differed in the 15th digit from run
+to run, because DuckDB adds up parallel sums in varying order. No decision changed, but the
+published scores should not depend on the thread scheduler, so the model runs on one thread.
+
 ## What this does not show, and what would change for production
 
 - **Terminology.** Validation checks the CARIN profiles without a terminology server, so it does
@@ -378,6 +440,12 @@ rows in a different order on each build. The sample is now chosen by a hash of t
   in resource types no model reads.
 - **The compiler.** It covers the FHIRPath features the shareable tests exercise, without the
   boundary functions. Real-world ViewDefinitions may use features beyond that set.
+- **Identity resolution.** The variations are generated, so they are cleaner than real ones: one
+  kind of error at a time per field, from short name lists. The nickname dictionary covers the
+  generator's nicknames, so its benefit here is an upper bound. The model links the PBM to the
+  payer; it does not deduplicate within the PBM, and nobody works the review queue. A production
+  master patient index would add more sources and fields (phone, address lines, SSN fragments),
+  merge and unmerge history, and people who review the uncertain cases.
 
 ## Lessons
 
@@ -397,7 +465,7 @@ rows in a different order on each build. The sample is now chosen by a hash of t
 ## Reproduce it
 
 ```bash
-make up && make seed && make synthea && make ingest && make dbt
+make up && make seed && make pbm && make synthea && make ingest && make dbt
 make coverage conformance fhir-validate-carin
 ```
 

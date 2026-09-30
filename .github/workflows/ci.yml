@@ -57,6 +57,9 @@ jobs:
       - name: Generate legacy data
         run: make seed
 
+      - name: Generate PBM feed
+        run: make pbm
+
       - name: Generate Synthea data
         run: make synthea
 

@@ -144,7 +144,30 @@ platform.
   *In this repo:* `Patient/<member_id>`, `Coverage/cov-<eligibility_id>`, `Organization/payer` and
   `Organization/<provider_id>`.
 
-## 8. Validate and prove parity
+## 8. Resolve identities before the API
+
+- [ ] **Keep each source's identifiers and link them in a cross-reference table.** Do not overwrite
+  one source's ID with another's; record which source ID resolves to which person, how and with
+  what confidence.
+  *In this repo:* `gold.member_xref` (PBM cardholder ID to legacy member ID).
+- [ ] **Measure matching against known truth before trusting it.** Build or label a set where you
+  know who is who, including look-alikes, and report precision and recall by kind of variation.
+  *In this repo:* the PBM generator's ground truth and `gold.identity_match_quality`.
+- [ ] **Compare against a simple baseline.** Exact rules show what a probabilistic model adds, and
+  where both fail.
+  *In this repo:* `identity_matches_deterministic` against `identity_matches_splink` (Splink).
+- [ ] **Look for relatives who share everything but a first name.** Twins and family members with
+  the same last name, birth date and address are the classic false merge.
+  *In this repo:* no automatic link when first names disagree completely; those cases go to review.
+- [ ] **Send uncertain matches to people, not to a merge.** A wrong merge exposes one person's data
+  to another; a missed match only delays it.
+  *In this repo:* `gold.identity_review_queue`; claims of unresolved cardholders are held back.
+- [ ] **Gate the build on matching quality** where the truth is known.
+  *In this repo:* `dbt/tests/assert_identity_match_quality.sql`.
+- [ ] **Deduplication within each source, merge and unmerge history, and working the review queue.**
+  **Not covered here.**
+
+## 9. Validate and prove parity
 
 - [ ] **Round-trip the data through FHIR.** Flatten the generated resources back into tables and
   compare them with the source tables, row by row, in both directions.
@@ -170,7 +193,7 @@ platform.
   **Not covered here** (`-tx n/a`). Without a server, clear the validator's terminology cache, or
   the result depends on what earlier runs cached.
 
-## 9. Report results people can trust
+## 10. Report results people can trust
 
 - [ ] **Tie every published number to a query or a command** that reproduces it.
   *In this repo:* the [results](results.md) page names the model or `make` target for each figure.
@@ -181,7 +204,7 @@ platform.
   *In this repo:* seed 42, a fixed reference date, pinned Python packages, Synthea and HL7 validator
   versions, and the Synthea download checked by SHA-256.
 
-## 10. Govern the data
+## 11. Govern the data
 
 - [ ] **Keep real PHI out of development and demos.** Use synthetic or properly de-identified data.
   *In this repo:* all data is synthetic (Synthea and the legacy generator).

@@ -7,11 +7,13 @@ How each part of the lakehouse works. The overview, the stack and the Quickstart
 
 The architecture diagram and the layer table are in the [README](../README.md#architecture).
 
-Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_member_months`,
-`fct_prior_auth_timeliness`; the quality and reliability models `dq_issue_summary`,
-`load_reliability`, `cdc_latency` and `fhir_view_parity`; the FHIR resources built from the legacy
-data (`fhir_patient`, `fhir_coverage`, `fhir_explanation_of_benefit`, `fhir_organization`); and the SQL on FHIR view
-outputs (`vd_synthea__*`, `vd_legacy__*`).
+Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_pbm_claims`,
+`fct_member_months`, `fct_prior_auth_timeliness`; the quality and reliability models
+`dq_issue_summary`, `load_reliability`, `cdc_latency` and `fhir_view_parity`; the identity
+resolution models (`identity_people`, `identity_matches_deterministic`, `identity_matches_splink`,
+`member_xref`, `identity_review_queue`, `identity_match_quality`); the FHIR resources built from the
+legacy and PBM data (`fhir_patient`, `fhir_coverage`, `fhir_explanation_of_benefit`,
+`fhir_organization`); and the SQL on FHIR view outputs (`vd_synthea__*`, `vd_legacy__*`).
 
 ## The simulated legacy source
 
@@ -134,3 +136,40 @@ providers (clinics) are Organization resources that the other resources referenc
   slices, invariants and value sets it can expand locally, but not whether CPT, ICD-10-CM or NDC
   codes exist. Codes from code systems distributed only as stubs (the NCPDP dispense as written
   code) are counted as unverified instead of failing the run.
+
+## The PBM feed and identity resolution
+
+A second source sends the same people under different identifiers. A pharmacy benefit manager
+(PBM) administers the pharmacy benefit for part of the members, issues its own cardholder IDs and
+sends pipe-delimited files: cardholders, pharmacies and pharmacy claims.
+`scripts/generate_pbm_feed.py` (`make pbm`) builds them from the legacy members, with nicknames,
+typos, changed last names, transposed or mistyped birth dates, old addresses and missing fields at
+documented rates, plus people the payer does not know, including look-alikes. A ground-truth file
+records who is who. `ingestion/load_pbm.py` loads the files into bronze as text, like any file
+feed, and staging types them (`stg_pbm__*`).
+
+Identity resolution happens in the data layer, before anything reaches the API:
+
+- **One shape.** `identity_people` puts both sources in the same normalized form (names lower case,
+  letters only; a nickname also mapped to the formal name through the seed `first_name_nicknames`).
+- **Baseline.** `identity_matches_deterministic` links on exact rules, the way a first master
+  patient index often does.
+- **Probabilistic model.** `identity_matches_splink` is a dbt Python model that runs
+  [Splink](https://moj-analytical-services.github.io/splink/) (Fellegi-Sunter) on an in-memory
+  DuckDB with one thread, so its working tables stay out of the lakehouse and its scores are the
+  same on every run. It is trained without labels.
+- **Decisions.** `member_xref` links a cardholder automatically only when the match is strong, the
+  first names do not disagree completely (relatives such as twins share last name, birth date and
+  address), there is no second likely candidate and no other cardholder claims the member. Likely
+  matches that fail a condition go to `identity_review_queue`, with both records side by side,
+  instead of being merged. Thresholds are dbt variables (`identity_auto_link_probability`,
+  `identity_review_probability`).
+- **Measurement.** `identity_match_quality` compares both methods with the ground truth, overall and
+  by variation; it is the only model that reads the truth. The test
+  `assert_identity_match_quality` fails the build if an automatic link is wrong or recall falls
+  below 95%.
+- **FHIR.** A linked member's Patient carries the PBM cardholder ID as a second member identifier.
+  PBM claims of linked members with coverage on the fill date become ExplanationOfBenefit
+  resources (Pharmacy profile) that reference the member's Patient and Coverage and the pharmacy's
+  Organization; the view parity and the CARIN validation cover them as a separate sample. Claims
+  of cardholders in review or unmatched stay in `fct_pbm_claims`, flagged.

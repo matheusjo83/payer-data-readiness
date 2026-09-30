@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed synthea ingest cdc changes views conformance dbt coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes views conformance dbt coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
@@ -15,12 +15,16 @@ reset:     ## Stop containers and delete all local data
 seed:      ## Generate synthetic legacy payer data (with deliberate quality issues)
 	$(PY) legacy_db/seed/generate_legacy_data.py
 
+pbm:       ## Generate the synthetic PBM feed (members, pharmacies, claims) from the legacy members
+	$(PY) scripts/generate_pbm_feed.py
+
 synthea:   ## Generate synthetic FHIR R4 data with Synthea
 	bash scripts/generate_synthea.sh
 
-ingest:    ## Snapshot (first run) or sync legacy changes via CDC, and load FHIR NDJSON into bronze
+ingest:    ## Snapshot (first run) or sync legacy changes via CDC, and load FHIR NDJSON and the PBM feed into bronze
 	$(PY) ingestion/cdc_legacy.py sync
 	$(PY) ingestion/load_fhir.py
+	$(PY) ingestion/load_pbm.py
 
 cdc:       ## Stream legacy changes into bronze continuously (Ctrl+C to stop)
 	$(PY) ingestion/cdc_legacy.py sync --follow --interval 5
@@ -56,4 +60,4 @@ fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .
 
-all: up seed synthea ingest dbt
+all: up seed pbm synthea ingest dbt
