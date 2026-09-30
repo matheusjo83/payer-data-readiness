@@ -154,7 +154,8 @@ platform.
   *In this repo:* `fhir/view_definitions/` compiled by `fhir/sof_duckdb/`.
 - [ ] **Test your tools against the specification's own tests.**
   *In this repo:* `fhir/conformance.py` against the SQL on FHIR shared test suite.
-- [ ] **Run the official validator on a reproducible sample.**
+- [ ] **Run the official validator on a reproducible sample.** Choose the sample by a hash of the
+  ID, not by physical row order, which can change on every rebuild.
   *In this repo:* `fhir/validate.py` with the HL7 FHIR validator, against base FHIR R4 and against
   CARIN Blue Button 2.1.0, in CI.
 - [ ] **Prove that each check can fail.** Run parity checks and validators against deliberately

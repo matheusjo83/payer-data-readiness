@@ -350,6 +350,11 @@ the offline result depended on the machine. The validation now clears that cache
 against tx.fhir.org showed that the fictitious NDCs the generator first produced would be rejected,
 so it now uses real NDCs of common generic drugs.
 
+A third gap was in the project's own claim of reproducibility. The first CI run of this phase reported the
+same zero errors as the local run but different warning counts. The "reproducible" sample, a
+reservoir sample with a fixed seed, depended on the physical order of the rows, and dbt writes the
+rows in a different order on each build. The sample is now chosen by a hash of the resource ID.
+
 ## What this does not show, and what would change for production
 
 - **Terminology.** Validation checks the CARIN profiles without a terminology server, so it does

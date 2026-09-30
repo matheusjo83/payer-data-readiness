@@ -1,7 +1,9 @@
 """Validate a sample of the legacy-derived FHIR resources with the official HL7 validator.
 
-Takes a reproducible sample (reservoir, fixed seed) of the gold FHIR models and
-runs the HL7 FHIR validator on it. Terminology is not checked (-tx n/a): the
+Takes a reproducible sample of the gold FHIR models and runs the HL7 FHIR
+validator on it. The sample is the first N resources ordered by md5 of a seed
+and the resource ID, so it does not depend on the physical row order, which
+changes each time dbt rebuilds a table (a reservoir sample did). Terminology is not checked (-tx n/a): the
 validator checks structure, cardinality, data types, invariants and value sets
 it can expand locally, but not whether codes such as CPT, ICD-10-CM or NDC exist
 in their code systems.
@@ -69,6 +71,7 @@ CARIN_SAMPLES = {
     "ExplanationOfBenefit.pharmacy": CARIN + "C4BB-ExplanationOfBenefit-Pharmacy|2.1.0",
 }
 BUNDLE_BASE = "https://payer-data-readiness.example/fhir/"
+SAMPLE_SEED = 42
 # Code systems whose content is not distributed (the terminology package has
 # only a stub). Without a terminology server (-tx n/a) the validator reports
 # their codes as errors although nothing is wrong with them; with tx.fhir.org
@@ -143,7 +146,7 @@ def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict
             if profile:
                 source = f"(SELECT * FROM {source} WHERE resource->>'$.meta.profile[0]' = '{profile}')"
             rows = con.execute(
-                f"SELECT id, resource FROM {source} USING SAMPLE reservoir({sample} ROWS) REPEATABLE (42)"
+                f"SELECT id, resource FROM {source} ORDER BY md5('{SAMPLE_SEED}:' || id) LIMIT {sample}"
             ).fetchall()
             for rid, resource in rows:
                 doc = json.loads(resource)

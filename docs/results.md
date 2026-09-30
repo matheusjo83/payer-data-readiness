@@ -156,7 +156,11 @@ and, in Phase 4 when invalid gender codes were still omitted, mapping them to `u
 **CARIN Blue Button conformance** (`make fhir-validate-carin`, HL7 validator 6.10.4, CARIN Blue
 Button STU 2.1.0, no terminology server). STU 2.1.0 is the version CMS lists for the Patient Access
 API; it lists 2.0.0 too, but as derived from standards that expired on January 1, 2026. Each
-ExplanationOfBenefit profile is sampled on its own, 200 resources per sample. Each sampled resource
+ExplanationOfBenefit profile is sampled on its own, 200 resources per sample: the first 200 by
+`md5('42:' || id)`, so the same data always gives the same sample. Until Phase 6 the sample was a
+reservoir sample with a fixed seed, which turned out to depend on the physical row order that
+changes each time dbt rebuilds a table; the base R4 figures published in Phase 4 came from such a
+sample. Each sampled resource
 is validated in a Bundle with the resources it references, so the references resolve and the
 referenced resources are checked against their target profiles too.
 
@@ -184,9 +188,9 @@ After remediation:
 | Patient                        |       200 |           0 |      200 |
 | Coverage                       |       200 |           0 |      800 |
 | Organization                   |       200 |           0 |      399 |
-| EOB Professional-NonClinician  |       200 |           0 |    2,576 |
-| EOB Inpatient-Institutional    |       200 |           0 |    2,614 |
-| EOB Outpatient-Institutional   |       200 |           0 |    2,584 |
+| EOB Professional-NonClinician  |       200 |           0 |    2,642 |
+| EOB Inpatient-Institutional    |       200 |           0 |    2,602 |
+| EOB Outpatient-Institutional   |       200 |           0 |    2,566 |
 | EOB Pharmacy                   |       200 |           0 |    1,600 |
 
 Warning counts include the resources in each Bundle. They are the `dom-6` narrative
