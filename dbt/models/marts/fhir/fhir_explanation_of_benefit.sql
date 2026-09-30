@@ -4,6 +4,9 @@
 -- bill) and Pharmacy. Only claims that pass the integrity checks are exported:
 -- a known member (EOB.patient) and a coverage span on the service date
 -- (EOB.insurance is required). The rest stay in gold.fct_claims, flagged.
+-- PBM pharmacy claims are exported too (Pharmacy profile) when identity
+-- resolution linked the cardholder to a member and the member had coverage on
+-- the fill date; the rest stay in gold.fct_pbm_claims, flagged.
 -- Nulls are stripped as described in fhir_patient.sql.
 {% set c4bb = 'http://hl7.org/fhir/us/carin-bb/CodeSystem/' %}
 with exported as (
@@ -172,3 +175,88 @@ select
 from exported c
 left join lines l using (claim_id)
 left join supporting_info s using (claim_id)
+
+union all
+
+select
+    c.rx_claim_id as id,
+    json_merge_patch('{}', json_object(
+        'resourceType', 'ExplanationOfBenefit',
+        'id', c.rx_claim_id,
+        'meta', json_object(
+            'lastUpdated', strftime(c.processed_at, '%Y-%m-%dT%H:%M:%SZ'),
+            'profile', json_array({{ carin_profile('C4BB-ExplanationOfBenefit-Pharmacy') }})),
+        'identifier', json_array(json_object(
+            'type', json_object('coding', json_array(json_object(
+                'system', '{{ c4bb }}C4BBIdentifierType',
+                'code', 'uc'))),
+            'system', 'https://pbm.example/rx-claim-id',
+            'value', c.rx_claim_id)),
+        'status', case when c.claim_status = 'reversed' then 'cancelled' else 'active' end,
+        'type', json_object('coding', json_array(json_object(
+            'system', 'http://terminology.hl7.org/CodeSystem/claim-type',
+            'code', 'pharmacy'))),
+        'use', 'claim',
+        'patient', json_object('reference', 'Patient/' || c.member_id),
+        'billablePeriod', json_object(
+            'start', strftime(c.fill_date, '%Y-%m-%d'),
+            'end', strftime(c.fill_date, '%Y-%m-%d')),
+        'created', strftime(c.processed_at, '%Y-%m-%d'),
+        'insurer', json_object('reference', 'Organization/payer'),
+        'provider', json_object('reference', 'Organization/' || c.pharmacy_id),
+        'outcome', 'complete',
+        'supportingInfo', json_array(
+            json_object('sequence', 1, 'category', json_object('coding', json_array(json_object(
+                    'system', '{{ c4bb }}C4BBSupportingInfoType', 'code', 'dayssupply'))),
+                'valueQuantity', json_object('value', c.days_supply)),
+            json_object('sequence', 2, 'category', json_object('coding', json_array(json_object(
+                    'system', '{{ c4bb }}C4BBSupportingInfoType', 'code', 'dawcode'))),
+                'code', json_object('coding', json_array(json_object(
+                    'system', 'http://terminology.hl7.org/CodeSystem/NCPDPDispensedAsWrittenOrProductSelectionCode',
+                    'code', c.dispense_as_written_code)))),
+            json_object('sequence', 3, 'category', json_object('coding', json_array(json_object(
+                    'system', '{{ c4bb }}C4BBSupportingInfoType', 'code', 'refillnum'))),
+                'valueQuantity', json_object('value', c.refill_number)),
+            json_object('sequence', 4, 'category', json_object('coding', json_array(json_object(
+                    'system', '{{ c4bb }}C4BBSupportingInfoType', 'code', 'refillsauthorized'))),
+                'valueQuantity', json_object('value', c.refills_authorized))),
+        'insurance', json_array(json_object(
+            'focal', true,
+            'coverage', json_object('reference', 'Coverage/cov-' || c.eligibility_id))),
+        'item', json_array(json_object(
+            'sequence', 1,
+            'productOrService', json_object('coding', json_array(json_object(
+                'system', 'http://hl7.org/fhir/sid/ndc', 'code', c.ndc_code))),
+            'servicedDate', strftime(c.fill_date, '%Y-%m-%d'),
+            'quantity', json_object('value', c.quantity),
+            'net', json_object('value', c.ingredient_cost, 'currency', 'USD'),
+            'adjudication', json_array(
+                json_object(
+                    'category', json_object('coding', json_array(json_object(
+                        'system', 'http://terminology.hl7.org/CodeSystem/adjudication', 'code', 'submitted'))),
+                    'amount', json_object('value', c.ingredient_cost, 'currency', 'USD')),
+                json_object(
+                    'category', json_object('coding', json_array(json_object(
+                        'system', 'http://terminology.hl7.org/CodeSystem/adjudication', 'code', 'benefit'))),
+                    'amount', json_object('value', c.plan_paid, 'currency', 'USD')),
+                json_object(
+                    'category', json_object('coding', json_array(json_object(
+                        'system', '{{ c4bb }}C4BBAdjudication', 'code', 'paidbypatient'))),
+                    'amount', json_object('value', c.patient_pay, 'currency', 'USD'))))),
+        'adjudication', json_array(json_object(
+            'category', json_object('coding', json_array(json_object(
+                'system', '{{ c4bb }}C4BBAdjudicationDiscriminator',
+                'code', 'benefitpaymentstatus'))),
+            'reason', json_object('coding', json_array(json_object(
+                'system', '{{ c4bb }}C4BBPayerAdjudicationStatus',
+                'code', case c.network_status when 'in_network' then 'innetwork' else 'outofnetwork' end))))),
+        'total', json_array(json_object(
+            'category', json_object('coding', json_array(json_object(
+                'system', 'http://terminology.hl7.org/CodeSystem/adjudication',
+                'code', 'submitted'))),
+            'amount', json_object('value', c.ingredient_cost, 'currency', 'USD'))),
+        'payment', json_object('amount', json_object('value', c.plan_paid, 'currency', 'USD'))
+    )) as resource
+from {{ ref('fct_pbm_claims') }} c
+where c.has_linked_member
+  and c.is_within_eligibility

@@ -39,3 +39,8 @@ Last day of coverage. Null when coverage is open-ended (`99991231` in the legacy
 {% docs fhir_loaded_at %}
 Time the FHIR resource was loaded into bronze.
 {% enddocs %}
+
+{% docs cardholder_id %}
+Cardholder ID issued by the PBM. It identifies a person in the PBM files only; the link to the
+payer's member ID comes from identity resolution (gold.member_xref).
+{% enddocs %}

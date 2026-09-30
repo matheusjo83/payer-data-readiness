@@ -12,6 +12,11 @@ vars:
   # months). Pinned to the legacy generator's --as-of so results do not depend
   # on the day dbt runs; override with --vars '{as_of_date: YYYY-MM-DD}'.
   as_of_date: "2026-09-28"
+  # Identity resolution (gold.member_xref): Splink match probability at or above
+  # which a cardholder is linked automatically, and at or above which it goes to
+  # human review instead of being left unmatched.
+  identity_auto_link_probability: 0.95
+  identity_review_probability: 0.50
 
 models:
   payer_data_readiness:
@@ -21,3 +26,7 @@ models:
     marts:
       +schema: gold
       +materialized: table
+
+seeds:
+  payer_data_readiness:
+    +schema: silver

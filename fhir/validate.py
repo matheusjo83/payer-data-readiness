@@ -15,8 +15,8 @@ Two modes:
                    specification applies. Writes data/fhir_validation/.
   --ig carin-bb    the CARIN Blue Button IG (STU 2.1.0, the version CMS
                    recommends for the Patient Access API), against the profile
-                   each resource declares. Each ExplanationOfBenefit profile is
-                   sampled on its own. Every sampled resource is written as a
+                   each resource declares. Each ExplanationOfBenefit profile, and
+                   the PBM claims, are sampled on their own. Every sampled resource is written as a
                    collection Bundle together with the resources it references
                    (Patient, Coverage, Organization), so the validator resolves
                    the references and checks the referenced resources against
@@ -60,15 +60,24 @@ BASE_SAMPLES = {t: None for t in ("Patient", "Coverage", "ExplanationOfBenefit")
 
 CARIN_PACKAGE = "hl7.fhir.us.carin-bb#2.1.0"
 CARIN = "http://hl7.org/fhir/us/carin-bb/StructureDefinition/"
-# label -> profile the sampled resources must declare (None: every resource of the type).
+
+
+def declares(profile: str) -> str:
+    return f"resource->>'$.meta.profile[0]' = '{CARIN}{profile}|2.1.0'"
+
+
+# label -> SQL condition on the gold table that selects the sample's population
+# (None: every resource of the type). PBM claims (IDs starting with PBM) are a
+# sample of their own, so the legacy pharmacy sample stays the same.
 CARIN_SAMPLES = {
     "Patient": None,
     "Coverage": None,
     "Organization": None,
-    "ExplanationOfBenefit.professional": CARIN + "C4BB-ExplanationOfBenefit-Professional-NonClinician|2.1.0",
-    "ExplanationOfBenefit.inpatient": CARIN + "C4BB-ExplanationOfBenefit-Inpatient-Institutional|2.1.0",
-    "ExplanationOfBenefit.outpatient": CARIN + "C4BB-ExplanationOfBenefit-Outpatient-Institutional|2.1.0",
-    "ExplanationOfBenefit.pharmacy": CARIN + "C4BB-ExplanationOfBenefit-Pharmacy|2.1.0",
+    "ExplanationOfBenefit.professional": declares("C4BB-ExplanationOfBenefit-Professional-NonClinician"),
+    "ExplanationOfBenefit.inpatient": declares("C4BB-ExplanationOfBenefit-Inpatient-Institutional"),
+    "ExplanationOfBenefit.outpatient": declares("C4BB-ExplanationOfBenefit-Outpatient-Institutional"),
+    "ExplanationOfBenefit.pharmacy": declares("C4BB-ExplanationOfBenefit-Pharmacy") + " AND id NOT LIKE 'PBM%'",
+    "ExplanationOfBenefit.pbm": "id LIKE 'PBM%'",
 }
 BUNDLE_BASE = "https://payer-data-readiness.example/fhir/"
 SAMPLE_SEED = 42
@@ -131,8 +140,8 @@ def bundle_with_references(con, focal: dict) -> tuple[dict, list[str]]:
 def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict]:
     """Write each sample as one file per resource, named <label>-<id>.json.
 
-    The label is a resource type, or ExplanationOfBenefit.<setting> for a sample
-    restricted to one declared profile. With bundles, each file is a Bundle
+    The label is a resource type, or ExplanationOfBenefit.<sample> for a sample
+    restricted by a condition (a declared profile, or the PBM claims). With bundles, each file is a Bundle
     holding the resource and what it references; without, meta.profile is removed.
     """
     input_dir = OUT_DIR / "input"
@@ -141,10 +150,10 @@ def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict
     con = duckdb.connect(LAKEHOUSE, read_only=True)
     counts, unresolved = {}, {}
     try:
-        for label, profile in samples.items():
+        for label, condition in samples.items():
             source = MODELS[label.partition(".")[0]]
-            if profile:
-                source = f"(SELECT * FROM {source} WHERE resource->>'$.meta.profile[0]' = '{profile}')"
+            if condition:
+                source = f"(SELECT * FROM {source} WHERE {condition})"
             rows = con.execute(
                 f"SELECT id, resource FROM {source} ORDER BY md5('{SAMPLE_SEED}:' || id) LIMIT {sample}"
             ).fetchall()

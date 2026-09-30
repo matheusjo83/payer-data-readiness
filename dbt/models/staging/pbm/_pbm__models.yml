@@ -1,0 +1,104 @@
+version: 2
+
+models:
+  - name: stg_pbm__members
+    description: PBM cardholders with parsed birth dates and decoded gender.
+    columns:
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests: [unique, not_null]
+      - name: first_name
+        description: First name as keyed by the PBM (upper case).
+      - name: last_name
+        description: Last name as keyed by the PBM (upper case).
+      - name: birth_date
+        description: Birth date. Null when missing or unparseable.
+      - name: gender
+        description: male, female, unknown, or null when missing.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['male', 'female', 'unknown']
+      - name: zip_code
+        description: ZIP code.
+      - name: state
+        description: Two-letter state code.
+
+  - name: stg_pbm__pharmacies
+    description: PBM network pharmacies.
+    columns:
+      - name: pharmacy_id
+        description: PBM pharmacy ID.
+        data_tests: [unique, not_null]
+      - name: npi
+        description: National Provider Identifier of the pharmacy.
+      - name: npi_valid
+        description: True when the NPI has 10 digits and a valid check digit (Luhn).
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [true]
+              config: {severity: warn}
+      - name: pharmacy_name
+        description: Pharmacy name.
+      - name: state
+        description: Two-letter state code.
+      - name: updated_at
+        description: "{{ doc('updated_at') }}"
+
+  - name: stg_pbm__claims
+    description: PBM pharmacy claims, typed.
+    columns:
+      - name: rx_claim_id
+        description: PBM claim ID.
+        data_tests: [unique, not_null]
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_pbm__members')
+                field: cardholder_id
+      - name: fill_date
+        description: Date the prescription was filled.
+        data_tests: [not_null]
+      - name: ndc_code
+        description: National Drug Code of the dispensed product (11-digit form).
+      - name: quantity
+        description: Quantity dispensed.
+      - name: days_supply
+        description: Days supply dispensed.
+      - name: dispense_as_written_code
+        description: NCPDP dispense as written (DAW) code.
+      - name: refill_number
+        description: Refill number (0 = original fill).
+      - name: refills_authorized
+        description: Number of refills authorized.
+      - name: pharmacy_id
+        description: Dispensing pharmacy.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_pbm__pharmacies')
+                field: pharmacy_id
+      - name: network_status
+        description: in_network or out_of_network.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['in_network', 'out_of_network']
+      - name: ingredient_cost
+        description: Submitted ingredient cost.
+      - name: patient_pay
+        description: Amount paid by the patient.
+      - name: plan_paid
+        description: Amount paid by the plan.
+      - name: claim_status
+        description: paid or reversed.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['paid', 'reversed']
+      - name: processed_at
+        description: When the PBM processed the claim (no time zone; treated as UTC).

@@ -1,0 +1,183 @@
+version: 2
+
+models:
+  - name: identity_people
+    description: >
+      Person records from the legacy member table and the PBM cardholder file in one shape,
+      normalized the same way for matching.
+    columns:
+      - name: source_dataset
+        description: legacy or pbm.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['legacy', 'pbm']
+      - name: unique_id
+        description: Legacy member ID or PBM cardholder ID.
+        data_tests: [not_null]
+      - name: first_name
+        description: First name, lower case, letters only.
+      - name: first_name_canonical
+        description: First name with a known nickname replaced by the formal name (seed first_name_nicknames).
+      - name: last_name
+        description: Last name, lower case, letters only.
+      - name: birth_date
+        description: Birth date. Null when missing or invalid.
+      - name: gender
+        description: male or female; null otherwise.
+      - name: zip_code
+        description: Five-digit ZIP code.
+      - name: state
+        description: Two-letter state code.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: ['source_dataset', 'unique_id']
+
+  - name: identity_matches_deterministic
+    description: >
+      Baseline: PBM cardholders matched to legacy members by exact rules (first name, last name
+      and birth date; last name, birth date and ZIP; first name, birth date and ZIP). One row per
+      cardholder with at least one candidate.
+    columns:
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests: [unique, not_null]
+      - name: member_id
+        description: The linked member, when all candidates point to one member.
+      - name: candidate_members
+        description: Number of distinct members the rules matched.
+      - name: rules
+        description: Rules that produced a candidate.
+      - name: status
+        description: linked or ambiguous.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['linked', 'ambiguous']
+
+  - name: identity_matches_splink
+    description: >
+      Candidate pairs of PBM cardholders and legacy members scored by a Splink (Fellegi-Sunter)
+      model trained without labels. Pairs with a match probability of at least 0.01.
+    columns:
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests: [not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests: [not_null]
+      - name: match_weight
+        description: Log2 Bayes factor of the pair (sum of the comparison weights and the prior).
+      - name: match_probability
+        description: Probability that the pair is the same person.
+      - name: gamma_first_name
+        description: "First name comparison level: -1 null, 0 disagree, higher is closer (5 exact, 4 nickname)."
+      - name: gamma_last_name
+        description: Last name comparison level (-1 null, 0 disagree, higher is closer).
+      - name: gamma_birth_date
+        description: Birth date comparison level (-1 null, 0 disagree, higher is closer).
+      - name: gamma_gender
+        description: Gender comparison level (-1 null, 0 disagree, 1 agree).
+      - name: gamma_zip_code
+        description: ZIP code comparison level (-1 null, 0 disagree, 1 agree).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: ['cardholder_id', 'member_id']
+
+  - name: member_xref
+    description: >
+      Cross-reference of PBM cardholders to legacy members, one row per cardholder: linked
+      automatically, sent to human review, or unmatched (see the model for the rules).
+    columns:
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests: [unique, not_null]
+      - name: member_id
+        description: The linked member. Null unless status is linked; a member is linked to one cardholder at most.
+        data_tests: [unique]
+      - name: candidate_member_id
+        description: Best Splink candidate, whatever the status.
+      - name: match_probability
+        description: Match probability of the best candidate.
+      - name: match_weight
+        description: Match weight of the best candidate.
+      - name: second_probability
+        description: Match probability of the second-best candidate, if any.
+      - name: status
+        description: linked, review or unmatched.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['linked', 'review', 'unmatched']
+      - name: reason
+        description: >
+          Why the cardholder was not linked: probability_below_auto_link, first_name_disagrees,
+          second_candidate, member_claimed_twice or no_likely_candidate.
+
+  - name: identity_review_queue
+    description: Cardholders in review, with the PBM and legacy records side by side.
+    columns:
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests: [unique, not_null]
+      - name: candidate_member_id
+        description: Best candidate member.
+      - name: reason
+        description: Why the match needs review (see member_xref).
+      - name: match_probability
+        description: Match probability of the best candidate.
+      - name: second_probability
+        description: Match probability of the second-best candidate, if any.
+      - name: pbm_first_name
+        description: First name in the PBM file (normalized).
+      - name: legacy_first_name
+        description: First name in the legacy member table (normalized).
+      - name: pbm_last_name
+        description: Last name in the PBM file (normalized).
+      - name: legacy_last_name
+        description: Last name in the legacy member table (normalized).
+      - name: pbm_birth_date
+        description: Birth date in the PBM file.
+      - name: legacy_birth_date
+        description: Birth date in the legacy member table.
+      - name: pbm_gender
+        description: Gender in the PBM file.
+      - name: legacy_gender
+        description: Gender in the legacy member table.
+      - name: pbm_zip_code
+        description: ZIP code in the PBM file.
+      - name: legacy_zip_code
+        description: ZIP code in the legacy member table.
+
+  - name: identity_match_quality
+    description: >
+      Identity resolution measured against the generator's ground truth, for the deterministic
+      baseline and Splink, overall and by injected variation.
+    columns:
+      - name: method
+        description: deterministic or splink.
+      - name: scope
+        description: all, an injected variation, or a kind of person the payer does not know.
+      - name: cardholders
+        description: Cardholders in scope.
+      - name: legacy_members
+        description: Cardholders in scope that are legacy members.
+      - name: linked_correct
+        description: Linked to the right member.
+      - name: linked_wrong
+        description: Linked to a member who is not the person (false positive).
+      - name: not_linked
+        description: Legacy members left unlinked (false negative).
+      - name: in_review
+        description: Sent to human review (Splink only).
+      - name: precision
+        description: linked_correct / (linked_correct + linked_wrong).
+      - name: recall
+        description: linked_correct / legacy_members.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: ['method', 'scope']

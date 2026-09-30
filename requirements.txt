@@ -4,3 +4,6 @@ duckdb==1.5.6
 dbt-core==1.12.5
 dbt-duckdb==1.11.0
 psycopg[binary]==3.3.6
+# Identity resolution (dbt Python model gold.identity_matches_splink).
+splink==5.0.0
+pyarrow==25.0.1

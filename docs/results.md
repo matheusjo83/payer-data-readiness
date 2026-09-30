@@ -25,6 +25,10 @@ In Phase 6 the legacy generator gained the claim fields the CARIN Blue Button pr
 valid NPI check digits. The new fields come from a separate random generator, and the NPI draw
 only has its last digit replaced, so every figure on this page stayed the same.
 
+Phase 7 added the PBM feed and identity resolution. The PBM generator has its own random
+generator and reads the legacy members without changing them, so the earlier figures stayed the
+same; the FHIR totals grew by the PBM claims and pharmacies, reported separately below.
+
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
@@ -38,6 +42,7 @@ only has its last digit replaced, so every figure on this page stayed the same.
 | SQL on FHIR conformance                | `make conformance`                      | Phase 4     |
 | FHIR validity of legacy-derived data   | `make fhir-validate`                    | Phase 4     |
 | CARIN Blue Button profile conformance  | `make fhir-validate-carin`              | Phase 6     |
+| Identity resolution against ground truth | `gold.identity_match_quality`         | Phase 7     |
 
 ## Data quality
 
@@ -90,13 +95,15 @@ metric correctly; they say nothing about how any real organization performs.
 ## Bronze load reliability
 
 From `bronze._load_log` (the source of `gold.load_reliability`), for the loads of a Quickstart
-run: the CDC snapshot of the legacy tables and the FHIR load.
+run: the CDC snapshot of the legacy tables, the FHIR load and (since Phase 7, timed in a later
+run) the PBM files.
 
 | Source                          | Loads | Successful | Rows loaded | Total load time |
 |---------------------------------|------:|-----------:|------------:|----------------:|
 | Legacy (Postgres, CDC snapshot) |     7 |          7 |     101,194 |          0.21 s |
 | Synthea (FHIR)                  |    20 |         20 |     610,239 |          3.81 s |
-| **Total**                       |    27 |         27 |     711,433 |          4.02 s |
+| PBM (pipe-delimited files)      |     4 |          4 |      11,516 |          0.07 s |
+| **Total**                       |    31 |         31 |     722,949 |          4.09 s |
 
 Each table and resource type was loaded once, so the 100% success rate comes from a single run
 and does not yet show a trend. The largest load was `Observation` (245,988 resources).
@@ -136,7 +143,10 @@ The 8 experimental tests that fail are the `lowBoundary()`/`highBoundary()` test
 compiler does not implement.
 
 **Legacy data exported as FHIR:** 5,000 Patient, 5,000 Coverage, 24,507 ExplanationOfBenefit and
-301 Organization (the payer and 300 providers) resources. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
+301 Organization (the payer and 300 providers) resources. Since Phase 7, also 4,573
+ExplanationOfBenefit resources from PBM claims and 25 pharmacy Organizations (29,080
+ExplanationOfBenefit and 326 Organization resources in all), and 2,847 Patients carry the PBM
+cardholder ID as a second member identifier. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
 unknown member and 251 outside the member's coverage, the counts in the data-quality table above.
 
 **View parity** (`gold.fhir_view_parity`):
@@ -148,6 +158,8 @@ unknown member and 251 outside the member's coverage, the counts in the data-qua
 | `legacy_coverage`    |     5,000 |          5,000 |            0 |                 0 |
 | `legacy_claims`      |    24,507 |         24,507 |            0 |                 0 |
 | `legacy_claim_lines` |    61,228 |         61,228 |            0 |                 0 |
+| `pbm_claims`         |     4,573 |          4,573 |            0 |                 0 |
+| `pbm_claim_lines`    |     4,573 |          4,573 |            0 |                 0 |
 
 To check that the comparison can fail, it was run against deliberately altered references: swapping
 paid for charged amounts gave 24,507 mismatched rows, adding the claims outside coverage gave 251,
@@ -192,6 +204,7 @@ After remediation:
 | EOB Inpatient-Institutional    |       200 |           0 |    2,602 |
 | EOB Outpatient-Institutional   |       200 |           0 |    2,566 |
 | EOB Pharmacy                   |       200 |           0 |    1,600 |
+| EOB Pharmacy, PBM claims (Phase 7) |   200 |           0 |    1,600 |
 
 Warning counts include the resources in each Bundle. They are the `dom-6` narrative
 recommendation; identifier types defined by CARIN rather than the base value set; `Coverage.type`
@@ -206,7 +219,7 @@ Two checks sit outside the validator:
   resolves, and `validate.py` fails if a sampled resource references something not exported.
 - **Terminology.** Without a terminology server, the validator reports the NCPDP dispense as
   written code as an error, because the code system is distributed only as a stub; with
-  tx.fhir.org the same code gets a warning. Those 400 errors (2 per pharmacy Bundle) are counted
+  tx.fhir.org the same code gets a warning. Those 400 errors per pharmacy sample (2 per Bundle) are counted
   separately as `terminology_unverified` and do not fail the run. The run also clears the
   validator's terminology cache (`-clear-tx-cache`), because it otherwise reuses codes cached by
   earlier runs against a server, and the result would depend on the machine. A test run against
@@ -227,26 +240,111 @@ ExplanationOfBenefit resources, 175,467 items) and over the legacy-derived resou
 61,228), producing tables with the same columns. The Synthea view is the slowest step of
 `dbt build` (about 14 seconds on this machine).
 
+## Identity resolution (Phase 7)
+
+**The PBM feed** (`make pbm`, `scripts/generate_pbm_feed.py`). A pharmacy benefit manager
+administers the pharmacy benefit for part of the members and issues its own cardholder IDs; its
+files do not carry the payer's member ID. The generator takes 60% of the covered legacy members and
+varies each record independently at documented rates, then adds people the payer does not know:
+
+| Variation (PBM record of a member)                  | Rate | Records |
+|-----------------------------------------------------|-----:|--------:|
+| First name replaced by a common nickname            | 8%   |     210 |
+| First name typo                                     | 4% (plus names without a nickname) | 145 |
+| Last name typo                                      | 4%   |     114 |
+| Different last name                                 | 2%   |      63 |
+| Birth date with day and month transposed            | 2% (when both are 12 or less) | 20 |
+| Birth date mistyped (day or year's last digit)      | 2%   |      72 |
+| Birth date missing                                  | 1%   |      29 |
+| Different ZIP code (moved)                          | 15%  |     436 |
+| Gender missing                                      | 3%   |      87 |
+| Legacy birth date invalid (PBM has a valid one)     | from the legacy source | 22 |
+| Legacy gender invalid                               | from the legacy source | 28 |
+
+Of the 2,900 PBM records of members, 1,841 have no variation and 1,059 have at least one. The
+feed also holds 232 unrelated people, 29 look-alikes with a member's name, ZIP code and gender but
+a different birth date, and 14 "twins" with a member's last name, birth date and ZIP code but
+another first name: 3,175 cardholders and 5,141 pharmacy claims. A ground-truth file records the
+member behind each cardholder and the variations; only `gold.identity_match_quality` reads it.
+
+**Methods.** Both compare first names after replacing known nicknames with the formal name (seed
+`first_name_nicknames`, which covers the generator's nicknames, so its benefit here is an upper
+bound).
+
+- *Deterministic baseline* (`gold.identity_matches_deterministic`): a cardholder is linked when
+  exact matches on first name, last name and birth date, or last name, birth date and ZIP code, or
+  first name, birth date and ZIP code all point to one member.
+- *Splink* (`gold.identity_matches_splink`, a dbt Python model): a Fellegi-Sunter model over first
+  name (exact, nickname, three Jaro-Winkler levels), last name (with term frequency adjustments),
+  birth date, gender and ZIP code, trained without labels (u from 2 million random pairs with a
+  fixed seed, m by expectation maximisation). `gold.member_xref` links a cardholder automatically
+  when the best candidate's match probability is at least 0.95, the first names do not disagree
+  completely, no second candidate reaches 0.50 and no other cardholder claims the same member; a
+  best candidate from 0.50 goes to review (`gold.identity_review_queue`), anything lower is
+  unmatched.
+
+Results (`gold.identity_match_quality`, 2,900 cardholders who are members):
+
+| Method        | Linked correctly | Linked to the wrong person | Not linked | In review | Precision | Recall  |
+|---------------|-----------------:|---------------------------:|-----------:|----------:|----------:|--------:|
+| Deterministic |            2,719 |                         14 |        181 |         — |    99.49% |  93.76% |
+| Splink        |            2,847 |                          0 |         53 |        69 |   100.00% |  98.17% |
+
+Recall by variation (a record with two variations counts in both rows):
+
+| Variation                  | Records | Deterministic | Splink |
+|----------------------------|--------:|--------------:|-------:|
+| Nickname                   |     210 |         93.3% |  94.3% |
+| First name typo            |     145 |         82.8% |  89.0% |
+| Last name typo             |     114 |         85.1% |  99.1% |
+| Different last name        |      63 |         79.4% |  84.1% |
+| Birth date transposed      |      20 |          0.0% |  90.0% |
+| Birth date mistyped        |      72 |          0.0% |  86.1% |
+| Birth date missing         |      29 |          0.0% |  89.7% |
+| Legacy birth date invalid  |      22 |          0.0% |  77.3% |
+| Moved (ZIP code)           |     436 |         89.0% |  93.1% |
+| Gender missing             |      87 |         91.9% |  95.4% |
+
+The 14 deterministic false positives are the 14 twins: the rule on last name, birth date and ZIP
+code links them. Splink scores 9 of the twins above 0.99 (the other 5 below 0.95): nicknames and
+typos teach it that differing first names are not rare among true matches. At the same threshold
+and without the first-name guard, a first model without the nickname level linked 2,838 correctly
+and 9 wrongly (those twins); the nickname level raised the correct links to 2,869 but left the 9;
+the guard sends them to review, at the cost of 10 true matches whose first names also disagree. The review queue holds 69 cardholders: 25
+members, each with the right member as the best candidate, and 44 people the payer does not know
+(the 14 twins, the 29 look-alikes and 1 unrelated person). No unrelated person was linked.
+
+**Effect on the FHIR data.** Of the 5,141 PBM claims, 4,573 are exported as ExplanationOfBenefit
+resources (Pharmacy profile) for linked members with coverage on the fill date; 39 claims of
+linked members fall outside their coverage, and 529 belong to cardholders in review or unmatched.
+They stay in `gold.fct_pbm_claims`, flagged. `assert_identity_match_quality` fails the build if the
+automatic links include a wrong person or find fewer than 95% of the members; applied to the
+deterministic baseline, it fails.
+
+The Splink model runs on one thread: with several, parallel sums added up in varying order and
+the scores differed in the 15th digit from run to run (no decision changed). On one thread, three
+consecutive builds gave identical scores.
+
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
-columns that exist in the database), after Phase 6.
+columns that exist in the database), after Phase 7.
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
-| Silver |      9 |              100% |              100% |      79 |               100% |              38.0% |
-| Gold   |     21 |              100% |              100% |     153 |               100% |              23.5% |
+| Silver |     12 |              100% |              100% |     108 |               100% |              37.0% |
+| Gold   |     28 |              100% |              100% |     231 |               100% |              20.3% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
-checks, not descriptive attributes such as names or amounts. `dbt build` ran 136 nodes: 131
+checks, not descriptive attributes such as names or amounts. `dbt build` ran 184 nodes: 179
 passed, 5 ended with the expected warnings for the legacy issues above, and none failed.
 In Phase 4, `lakehouse_full_refresh` ran the same steps in Airflow with the same result; it was not
-rerun after Phase 6.
+rerun after Phases 6 and 7.
 
 ## Reproducibility
 
-Both data generators and the gold models are pinned, so the results do not depend on the day they run:
+The data generators and the gold models are pinned, so the results do not depend on the day they run:
 
 - **Legacy source.** `generate_legacy_data.py` anchors every date to `--as-of` (default
   2026-09-28) instead of the current date, with a fixed seed (42). Pass `--as-of YYYY-MM-DD` to
@@ -258,6 +356,11 @@ Both data generators and the gold models are pinned, so the results do not depen
   (`END_DATE`, `-e`, default the reference date). Without `-e`, Synthea simulates up to the moment
   it runs, so a run on a later day adds encounters and observations. All are variables at the top
   of the script; changing the version also requires changing `SYNTHEA_SHA256`.
+- **PBM feed.** `scripts/generate_pbm_feed.py` reads the legacy members in a fixed order and uses
+  its own random generator (seed 42 + 2) and the same reference date, so repeated runs write
+  byte-identical files.
+- **Identity resolution.** The Splink model samples its u probabilities with a fixed seed and runs
+  on one thread, so its scores are identical from build to build.
 - **Gold models.** Wherever a model needs "today" (`fct_member_months`, and the
   `is_currently_covered` flag in `dim_member`), it uses the dbt variable `as_of_date` (default
   2026-09-28, the legacy generator's reference date) instead of `current_date`. Pass
