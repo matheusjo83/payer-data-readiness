@@ -1,5 +1,7 @@
 # Payer Data Readiness Lakehouse
 
+[![CI](https://github.com/matheusjo83/payer-data-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/matheusjo83/payer-data-readiness/actions/workflows/ci.yml)
+
 A reproducible reference implementation of how a health plan (payer) can modernize a legacy
 analytics warehouse into a governed lakehouse, so that the data behind interoperability APIs,
 analytics and AI is **reliable, timely and traceable**.
@@ -112,6 +114,11 @@ DuckDB allows one writer at a time. The CDC loader opens the lakehouse only whil
 batch and retries on the next poll if the file is busy, but `make dbt` can still fail if it starts
 in the middle of a write; stopping `make cdc` first avoids that.
 
+**Continuous integration.** On every pull request and push to `main`, GitHub Actions
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed synthea ingest dbt
+conformance fhir-validate` on a clean runner. The run fails if a model or data test fails, if any
+shareable SQL on FHIR test fails, or if the HL7 validator reports an error in the sample.
+
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
 
@@ -146,6 +153,7 @@ dbt/           Silver and gold models, tests, lineage
 airflow/       Airflow image and DAGs
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation
 docs/          Technical write-up, migration checklist, architecture details and results
+.github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request)
 ```
 
 ## Author

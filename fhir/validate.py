@@ -9,6 +9,9 @@ whether codes such as CPT or ICD-10-CM exist in their code systems.
 Usage (from the repository root, Java 17+ required):
     python fhir/validate.py                 # writes data/fhir_validation/summary.json
     python fhir/validate.py --sample 50
+
+Exits with status 1 if any sampled resource has an error, or if a resource type
+has nothing to validate. Warnings do not fail the run.
 """
 
 import argparse
@@ -123,6 +126,11 @@ def main() -> None:
     for m in summary["top_messages"]:
         print(f"  [{m['severity']}] {m['resource']} x{m['count']}: {m['message']}")
     print(f"\nSummary written to {OUT_DIR / 'summary.json'}")
+
+    empty = [t for t, s in summary["by_resource"].items() if s["validated"] == 0]
+    failing = [t for t, s in summary["by_resource"].items() if s["resources_with_errors"]]
+    if empty or failing:
+        raise SystemExit(f"Validation failed: no resources for {empty or '-'}; errors in {failing or '-'}")
 
 
 if __name__ == "__main__":

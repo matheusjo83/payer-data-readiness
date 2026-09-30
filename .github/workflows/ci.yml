@@ -1,0 +1,89 @@
+# Runs the Quickstart end to end on synthetic data and fails if any gate fails:
+# dbt build (models and data tests), the SQL on FHIR v2 test suite (shareable
+# tests) and the HL7 FHIR validator (base FHIR R4, no terminology) on a sample
+# of the legacy-derived resources.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Synthea and the HL7 validator are pinned in these scripts; the cache key
+      # changes when either version does.
+      - name: Cache tool jars
+        uses: actions/cache@v4
+        with:
+          path: tools/*.jar
+          key: tools-${{ hashFiles('scripts/generate_synthea.sh', 'fhir/validate.py') }}
+
+      - name: Cache FHIR packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.fhir/packages
+          key: fhir-packages-${{ hashFiles('fhir/validate.py') }}
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start legacy database
+        run: make up
+
+      - name: Generate legacy data
+        run: make seed
+
+      - name: Generate Synthea data
+        run: make synthea
+
+      - name: Ingest into bronze
+        run: make ingest
+
+      - name: dbt build
+        run: make dbt
+
+      - name: SQL on FHIR conformance
+        run: make conformance
+
+      - name: FHIR validation
+        run: make fhir-validate
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          if-no-files-found: ignore
+          path: |
+            data/sof_conformance.json
+            data/fhir_validation/summary.json
+            data/fhir_validation/validator.log
+            dbt/target/run_results.json
+
+      - name: Stop legacy database
+        if: always()
+        run: docker compose down -v
