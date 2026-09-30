@@ -126,10 +126,14 @@ platform.
 
 - [ ] **Pick the target profiles early.** Know which implementation guide the API will follow (for
   payer data, often CARIN Blue Button, US Core and Da Vinci guides) and which elements it requires.
-  *In this repo:* alignment with CARIN Blue Button Patient, Coverage and ExplanationOfBenefit.
+  *In this repo:* CARIN Blue Button STU 2.1.0 (the version CMS lists for the Patient Access API),
+  declared in each resource's `meta.profile`. Measuring the gap first showed which missing elements
+  were mapping work and which were data the legacy source did not have.
 - [ ] **Never map an invalid source value to a plausible one.** Omit it, or use a data-absent
-  reason, and keep the quality flag in the analytics layer.
-  *In this repo:* invalid gender codes omitted in `fhir_patient`.
+  reason or the standard's own "unknown" value when the profile requires the element, and keep the
+  quality flag in the analytics layer.
+  *In this repo:* invalid gender codes become `unknown` in `fhir_patient` (CARIN requires a gender)
+  and stay counted in `gold.dq_issue_summary`.
 - [ ] **Enforce FHIR JSON rules while building resources.** No null values, no empty arrays, valid
   date formats.
   *In this repo:* `json_merge_patch('{}', …)` in `dbt/models/marts/fhir/`.
@@ -137,7 +141,8 @@ platform.
   not export records without them. Count what is held back and why.
   *In this repo:* the integrity filter in `fhir_explanation_of_benefit` (493 claims held back).
 - [ ] **Use stable identifiers and consistent references** between resources.
-  *In this repo:* `Patient/<member_id>` and `Coverage/cov-<eligibility_id>`.
+  *In this repo:* `Patient/<member_id>`, `Coverage/cov-<eligibility_id>`, `Organization/payer` and
+  `Organization/<provider_id>`.
 
 ## 8. Validate and prove parity
 
@@ -150,12 +155,19 @@ platform.
 - [ ] **Test your tools against the specification's own tests.**
   *In this repo:* `fhir/conformance.py` against the SQL on FHIR shared test suite.
 - [ ] **Run the official validator on a reproducible sample.**
-  *In this repo:* `fhir/validate.py` with the HL7 FHIR validator against base FHIR R4.
+  *In this repo:* `fhir/validate.py` with the HL7 FHIR validator, against base FHIR R4 and against
+  CARIN Blue Button 2.1.0, in CI.
 - [ ] **Prove that each check can fail.** Run parity checks and validators against deliberately
   broken input and confirm they report the expected number of failures.
-  *In this repo:* the sabotage runs reported in the [results](results.md#fhir-phase-4).
-- [ ] **Validate against the target profiles and a terminology server.**
-  **Not covered here** (base R4 only, `-tx n/a`).
+  *In this repo:* the sabotage runs reported in the [results](results.md#fhir-phases-4-and-6).
+- [ ] **Validate against the target profiles, with references resolved.** Validate each resource
+  together with the resources it references, so the referenced resources are checked against their
+  target profiles too, and check separately that every reference resolves: the HL7 validator does
+  not report an unresolved reference inside a Bundle as an error.
+  *In this repo:* `make fhir-validate-carin` (Bundles) and `dbt/tests/assert_fhir_references_resolve.sql`.
+- [ ] **Validate codes with a terminology server.**
+  **Not covered here** (`-tx n/a`). Without a server, clear the validator's terminology cache, or
+  the result depends on what earlier runs cached.
 
 ## 9. Report results people can trust
 
@@ -165,8 +177,8 @@ platform.
 - [ ] **Update published numbers when the code changes them**, and say why they changed.
   *In this repo:* the Phase 3 note in the [results](results.md).
 - [ ] **Make runs reproducible.** Fixed seeds, pinned tool versions and a single command sequence.
-  *In this repo:* seed 42 and pinned Python packages; the generator's dependence on the run date and
-  the unpinned Synthea download are documented limitations.
+  *In this repo:* seed 42, a fixed reference date, pinned Python packages, Synthea and HL7 validator
+  versions, and the Synthea download checked by SHA-256.
 
 ## 10. Govern the data
 

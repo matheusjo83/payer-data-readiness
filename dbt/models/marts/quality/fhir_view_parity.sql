@@ -14,7 +14,7 @@
     'legacy_patients': {
         'view': "select patient_id, gender, try_cast(birth_date as date) as birth_date, state, postal_code
                  from " ~ ref('vd_legacy__patient_demographics'),
-        'reference': "select member_id, case when gender in ('male', 'female', 'unknown') then gender end,
+        'reference': "select member_id, case when gender in ('male', 'female') then gender else 'unknown' end,
                              birth_date, state, zip_code
                       from " ~ ref('dim_member'),
     },
@@ -39,7 +39,9 @@
         'view': "select eob_id, item_sequence, product_code, try_cast(serviced_start as date),
                         cast(net_amount as decimal(12, 2))
                  from " ~ ref('vd_legacy__eob_items'),
-        'reference': "select l.claim_id, l.line_number, l.procedure_code, c.service_from_date, l.charged_amount
+        'reference': "select l.claim_id, l.line_number,
+                             case when c.claim_type = 'pharmacy' then l.ndc_code else l.procedure_code end,
+                             c.service_from_date, l.charged_amount
                       from " ~ ref('stg_legacy__claim_lines') ~ " l
                       join " ~ ref('fct_claims') ~ " c using (claim_id)
                       where c.has_known_member and c.is_within_eligibility",

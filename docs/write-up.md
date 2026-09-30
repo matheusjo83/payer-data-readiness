@@ -33,6 +33,10 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   time. Claude Code wrote the code; ran the tests, reconciliations and validations; and found and
   diagnosed the problems described in the write-up. Matheus decided how to handle the eligibility
   artifact. He supervised by reading Claude Code's explanations and summaries at each step.
+- **After Phase 5** (reproducibility pinning, metric fixes, continuous integration and Phase 6,
+  profile conformance) the work was done the same way, by Claude Code under Matheus's supervision,
+  including changes to the legacy generator Matheus wrote in Phase 1. In Phase 6, Matheus chose
+  how to handle the fields the legacy source lacked, the invalid gender codes and the references.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -57,10 +61,11 @@ work he did himself. Work done by Claude Code is attributed to it.
 - **SQL on FHIR on DuckDB.** Claude Code wrote a compiler from SQL on FHIR v2 ViewDefinitions to DuckDB
   SQL.
   It passes all 133 shareable tests of the specification's shared test suite.
-- **Legacy data as FHIR, checked two ways.** The legacy data becomes 5,000 Patient, 5,000 Coverage
-  and 24,507 ExplanationOfBenefit resources. Round trips through FHIR reproduce the source tables
-  with zero differing rows, and the HL7 validator reports zero errors on a 600-resource sample
-  (against base FHIR R4; terminology not checked).
+- **Legacy data as FHIR, checked two ways.** The legacy data becomes 5,000 Patient, 5,000 Coverage,
+  24,507 ExplanationOfBenefit and 301 Organization resources. Round trips through FHIR reproduce the
+  source tables with zero differing rows, and the HL7 validator reports zero errors on a
+  1,400-resource sample against the CARIN Blue Button 2.1.0 profiles, with references resolved
+  (terminology not checked). Before remediation, every sampled resource failed those profiles.
 
 These figures describe synthetic data generated with a fixed seed. They show that the pipeline
 behaves as designed. They do not describe any real health plan.
@@ -189,13 +194,13 @@ claims, member months and prior authorization timeliness, and the quality and re
 Tests fall into two groups on purpose. Tests on keys, relationships and allowed values that should
 always hold are errors, and they fail the build. Tests that flag issues known to exist in the
 legacy source are warnings: they count those issues without stopping the pipeline, and
-`gold.dq_issue_summary` reports the counts. The final build ran 128 nodes: 123 passed and 5 ended
+`gold.dq_issue_summary` reports the counts. The final build ran 136 nodes: 131 passed and 5 ended
 in the expected warnings.
 
 For coverage, a small script written by Claude Code combines the dbt manifest (descriptions and tests) with
 the catalog (the columns that actually exist in the database). A column that exists but is missing
 from the documentation counts against coverage. Every model and column is documented, and every
-model has at least one test. Column-level test coverage is 41.8% in silver and 24.3% in gold. I
+model has at least one test. Column-level test coverage is 38.0% in silver and 23.5% in gold. I
 publish those numbers as they are. The tests cover keys, relationships, allowed values, parity and
 the quality checks, and adding tests to descriptive columns only to raise the percentage would make
 the metric less honest, not the data more reliable.
@@ -265,16 +270,17 @@ ExplanationOfBenefit resources, the view is the slowest step of the build, at ab
 
 ## Legacy data as FHIR, and how it was checked
 
-The last step turns the legacy warehouse into FHIR R4 resources aligned with the CARIN Blue Button
-profiles: Patient, Coverage and ExplanationOfBenefit. "Aligned" is deliberate. The resources carry
-the elements those profiles center on, but they were validated against base FHIR R4, not against the
-CARIN profiles.
+The last step of Phase 4 turned the legacy warehouse into FHIR R4 resources aligned with the CARIN
+Blue Button profiles: Patient, Coverage and ExplanationOfBenefit. "Aligned" was deliberate. The
+resources carried the elements those profiles center on, but they were validated against base FHIR
+R4, not against the CARIN profiles. Phase 6, described in the next section, closed that gap.
 
 Three rules guided the mapping:
 
-- **Don't invent data.** Legacy gender codes outside M/F/U are omitted rather than mapped to
-  `unknown`, which would hide the fact that the source value was invalid. FHIR does not allow null
-  values or empty arrays, so the SQL that builds each resource strips them.
+- **Don't invent data.** In Phase 4, legacy gender codes outside M/F/U were omitted rather than
+  mapped to `unknown`, which I thought would hide the fact that the source value was invalid. Phase 6
+  changed this, as explained below. FHIR does not allow null values or empty arrays, so the SQL that
+  builds each resource strips them.
 - **Gate on integrity.** An ExplanationOfBenefit requires a patient and a coverage. Claims with an
   unknown member or outside the member's coverage are not exported: 493 of 25,000, exactly the 242
   and 251 counted by the quality checks. They stay in the gold claims table with their flags, so
@@ -301,11 +307,56 @@ a human-readable narrative, which these resources do not. As with the parity tes
 that the validator fails when it should. It rejected hand-made resources with the legacy problems the mapping avoids: a
 null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing required elements.
 
+## Profile conformance
+
+A comment on the project asked whether the validation covered payer profiles or only the base
+specification. It covered only the base specification, so Phase 6 measured the distance to the
+CARIN Blue Button profiles and then closed it. Claude Code checked which version CMS lists for the
+Patient Access API: STU 2.1.0, which builds on US Core 6.1.0. CMS lists 2.0.0 too, but marks it as
+derived from standards that expired on January 1, 2026.
+
+The baseline ran the HL7 validator against CARIN on the Phase 4 resources. Every sampled resource
+failed: 1,000 of 1,000, with 24 distinct errors. About half were mapping gaps, where the data
+existed but the resource did not carry it (`meta.lastUpdated`, identifier types, diagnosis types).
+The other half were fields the legacy source did not have at all: the type of bill that separates
+inpatient from outpatient claims, the place of service, the network status and the pharmacy
+details (NDC, days supply, dispense as written code, refills).
+
+Claude Code presented three decisions, and I chose its recommendation each time:
+
+- **Missing fields.** Extend the legacy generator with them, rather than documenting the gap or
+  exporting only what could conform. Real payer warehouses have these fields. To keep every
+  published figure, the new fields come from a separate random generator, so the original columns
+  kept their values; the rebuild confirmed that nothing on the results page changed.
+- **Gender.** Map invalid codes to `unknown`. The profile requires a gender, and FHIR's `unknown`
+  says exactly what is true: the value is not known. The invalid source codes stay counted in the
+  quality table, so the problem is still visible where it belongs.
+- **References.** Validate each sampled resource in a Bundle with the resources it references, and
+  add Organization resources for the payer and the providers, instead of leaving the references for
+  later.
+
+The references paid off at once. With them resolved, the validator found three problems that
+validating resources one by one had hidden: the Organizations had no `meta.lastUpdated`, about 90% of
+the synthetic NPIs had an invalid check digit, and the payer referenced by every claim failed its
+profile, which the validator reported on each claim and coverage that pointed to it. After Claude
+Code fixed them, the validator reports zero errors on 1,400 sampled resources: 200 per resource type
+and per ExplanationOfBenefit profile.
+
+Checking that the checks could fail found two gaps in the tooling itself. First, the validator does
+not report a reference it cannot resolve inside a Bundle: a Bundle with the provider removed
+passed. A dbt test now checks that every reference in all exported resources resolves. Second, the
+validator without a terminology server still reused codes cached by an earlier run against one, so
+the offline result depended on the machine. The validation now clears that cache. The same test
+against tx.fhir.org showed that the fictitious NDCs the generator first produced would be rejected,
+so it now uses real NDCs of common generic drugs.
+
 ## What this does not show, and what would change for production
 
-- **Profile conformance and terminology.** Validation used base FHIR R4 without a terminology
-  server, so it does not check the CARIN profiles or whether CPT and ICD-10-CM codes exist. A
-  production Patient Access API would need both, plus narratives.
+- **Terminology.** Validation checks the CARIN profiles without a terminology server, so it does
+  not check whether CPT, ICD-10-CM, NDC, revenue or place of service codes exist, and it counts the
+  NCPDP dispense as written code, whose code system is distributed only as a stub, as unverified. A
+  production Patient Access API would need a terminology server with licensed code systems, plus
+  narratives. Validation also covers a sample, not every resource.
 - **Scale and concurrency.** DuckDB's single writer shapes the orchestration. At scale, the next step
   would be to move to a table format with concurrent writers, such as Iceberg or Delta, and materialize the CDC
   current state incrementally instead of rebuilding it with a window function over all changes.
@@ -332,7 +383,7 @@ null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing requ
    rebuilt state against the source, not in unit-level checks.
 3. **Make tests prove they can fail.** A parity check or a validator that always passes is only
    evidence once you have seen it catch a deliberate error.
-4. **Publish the uncomfortable numbers.** Column test coverage of 24%, eight unimplemented
+4. **Publish the uncomfortable numbers.** Column test coverage of 23.5%, eight unimplemented
    experimental tests and a 14-second view are part of the result. Hiding them would make every
    other number less credible.
 5. **Treat the data layer as the product.** An interoperability API can only be as reliable as the
@@ -342,7 +393,7 @@ null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing requ
 
 ```bash
 make up && make seed && make synthea && make ingest && make dbt
-make coverage conformance fhir-validate
+make coverage conformance fhir-validate-carin
 ```
 
 Requirements and the CDC streaming demo are in the repository's README, and the Airflow setup is

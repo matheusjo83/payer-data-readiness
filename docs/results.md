@@ -20,6 +20,11 @@ timestamp, and anchoring the legacy timestamps to midnight of the reference date
 The model now measures elapsed time, and the expedited mean is 30.8 h again (30.76 h; with the
 old calculation, 30.75 h). No other prior authorization figure changed.
 
+In Phase 6 the legacy generator gained the claim fields the CARIN Blue Button profiles require
+(network status, type of bill, revenue codes, place of service, NDC and dispensing details) and
+valid NPI check digits. The new fields come from a separate random generator, and the NPI draw
+only has its last digit replaced, so every figure on this page stayed the same.
+
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
@@ -32,6 +37,7 @@ old calculation, 30.75 h). No other prior authorization figure changed.
 | FHIR view parity (hand-written vs. ViewDefinition) | `gold.fhir_view_parity` | Phase 4     |
 | SQL on FHIR conformance                | `make conformance`                      | Phase 4     |
 | FHIR validity of legacy-derived data   | `make fhir-validate`                    | Phase 4     |
+| CARIN Blue Button profile conformance  | `make fhir-validate-carin`              | Phase 6     |
 
 ## Data quality
 
@@ -117,7 +123,7 @@ tables matched the Postgres tables row for row in all seven tables.
 Both processes ran on the same machine, so the source and lakehouse clocks agree; with separate
 hosts, clock skew would add to the measured latency.
 
-## FHIR (Phase 4)
+## FHIR (Phases 4 and 6)
 
 **SQL on FHIR conformance** (`make conformance`, suite commit `0821b67`):
 
@@ -129,8 +135,8 @@ hosts, clock skew would add to the measured latency.
 The 8 experimental tests that fail are the `lowBoundary()`/`highBoundary()` tests, which the
 compiler does not implement.
 
-**Legacy data exported as FHIR:** 5,000 Patient, 5,000 Coverage and 24,507 ExplanationOfBenefit
-resources. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
+**Legacy data exported as FHIR:** 5,000 Patient, 5,000 Coverage, 24,507 ExplanationOfBenefit and
+301 Organization (the payer and 300 providers) resources. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
 unknown member and 251 outside the member's coverage, the counts in the data-quality table above.
 
 **View parity** (`gold.fhir_view_parity`):
@@ -145,20 +151,72 @@ unknown member and 251 outside the member's coverage, the counts in the data-qua
 
 To check that the comparison can fail, it was run against deliberately altered references: swapping
 paid for charged amounts gave 24,507 mismatched rows, adding the claims outside coverage gave 251,
-and mapping invalid gender codes to `unknown` gave 51.
+and, in Phase 4 when invalid gender codes were still omitted, mapping them to `unknown` gave 51.
 
-**FHIR validation** (`make fhir-validate`, 200 resources of each type, base FHIR R4):
+**CARIN Blue Button conformance** (`make fhir-validate-carin`, HL7 validator 6.10.4, CARIN Blue
+Button STU 2.1.0, no terminology server). STU 2.1.0 is the version CMS lists for the Patient Access
+API; it lists 2.0.0 too, but as derived from standards that expired on January 1, 2026. Each
+ExplanationOfBenefit profile is sampled on its own, 200 resources per sample. Each sampled resource
+is validated in a Bundle with the resources it references, so the references resolve and the
+referenced resources are checked against their target profiles too.
 
-| Resource             | Validated | Errors | Warnings |
-|----------------------|----------:|-------:|---------:|
-| Patient              |       200 |      0 |      200 |
-| Coverage             |       200 |      0 |      200 |
-| ExplanationOfBenefit |       200 |      0 |      200 |
+Baseline, before remediation (the Phase 4 resources, tagged with the profile for their type; 200
+per claim type, institutional claims checked as outpatient):
 
-Every warning is `dom-6`, the best-practice recommendation that resources carry a human-readable
-narrative (`text`), which these resources do not have. As a check, the validator rejected
-hand-made resources with the legacy problems the mapping avoids (a null value, gender `invalid`, a
-`YYYYMMDD` date, an empty array, missing required elements).
+| Sample                | With errors | Distinct errors | Main causes                                                    |
+|-----------------------|------------:|----------------:|----------------------------------------------------------------|
+| Patient               |     200/200 |               3 | no `meta.lastUpdated`, no member ID type, 4 without gender     |
+| Coverage              |     200/200 |               1 | no `meta.lastUpdated`                                          |
+| EOB professional      |     200/200 |               5 | no unique claim ID type, diagnosis type, place of service, network status |
+| EOB institutional     |     200/200 |               6 | as above, plus no subtype (inpatient or outpatient)            |
+| EOB pharmacy          |     200/200 |               9 | as above, plus days supply, DAW code, refill number and refills authorized |
+
+About half of the causes were mapping gaps (the data existed); the other half were fields the
+legacy source did not have, which the generator now produces. The first run after remediation
+found three more problems that only show when references are resolved: the Organization resources
+had no `meta.lastUpdated`, about 90% of the synthetic NPIs had an invalid check digit, and one pharmacy
+code was rejected (see the note on terminology below).
+
+After remediation:
+
+| Sample                         | Validated | With errors | Warnings |
+|--------------------------------|----------:|------------:|---------:|
+| Patient                        |       200 |           0 |      200 |
+| Coverage                       |       200 |           0 |      800 |
+| Organization                   |       200 |           0 |      399 |
+| EOB Professional-NonClinician  |       200 |           0 |    2,576 |
+| EOB Inpatient-Institutional    |       200 |           0 |    2,614 |
+| EOB Outpatient-Institutional   |       200 |           0 |    2,584 |
+| EOB Pharmacy                   |       200 |           0 |    1,600 |
+
+Warning counts include the resources in each Bundle. They are the `dom-6` narrative
+recommendation; identifier types defined by CARIN rather than the base value set; `Coverage.type`
+without a Payer Type code; and revenue and place of service codes whose code systems are not
+distributed, so they cannot be checked without a terminology server.
+
+Two checks sit outside the validator:
+
+- **References.** The validator does not report a reference it cannot resolve inside a Bundle as
+  an error (a Bundle with the provider Organization removed passed). A dbt test
+  (`assert_fhir_references_resolve`) checks that every reference in all exported resources
+  resolves, and `validate.py` fails if a sampled resource references something not exported.
+- **Terminology.** Without a terminology server, the validator reports the NCPDP dispense as
+  written code as an error, because the code system is distributed only as a stub; with
+  tx.fhir.org the same code gets a warning. Those 400 errors (2 per pharmacy Bundle) are counted
+  separately as `terminology_unverified` and do not fail the run. The run also clears the
+  validator's terminology cache (`-clear-tx-cache`), because it otherwise reuses codes cached by
+  earlier runs against a server, and the result would depend on the machine. A test run against
+  tx.fhir.org rejected the fictitious NDCs the generator first used, so it now uses 10 real NDCs of
+  common generic drugs, confirmed on tx.fhir.org.
+
+To check that the validation can fail, it was run on altered Bundles: removing the unique claim ID
+type from an EOB and removing `meta.lastUpdated` from the payer Organization each produced errors
+(the latter also on the EOB and Coverage that reference it).
+
+**Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
+removed from the exported copies): 0 errors for Patient, Coverage and ExplanationOfBenefit. As a
+check, the validator rejected hand-made resources with the legacy problems the mapping avoids (a
+null value, gender `invalid`, a `YYYYMMDD` date, an empty array, missing required elements).
 
 **One view, two sources.** The same `eob_summary` and `eob_items` views run over Synthea (53,875
 ExplanationOfBenefit resources, 175,467 items) and over the legacy-derived resources (24,507 and
@@ -168,18 +226,19 @@ ExplanationOfBenefit resources, 175,467 items) and over the legacy-derived resou
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
-columns that exist in the database), after Phase 4.
+columns that exist in the database), after Phase 6.
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
-| Silver |      9 |              100% |              100% |      67 |               100% |              41.8% |
-| Gold   |     20 |              100% |              100% |     140 |               100% |              24.3% |
+| Silver |      9 |              100% |              100% |      79 |               100% |              38.0% |
+| Gold   |     21 |              100% |              100% |     153 |               100% |              23.5% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
-checks, not descriptive attributes such as names or amounts. `dbt build` ran 128 nodes: 123
+checks, not descriptive attributes such as names or amounts. `dbt build` ran 136 nodes: 131
 passed, 5 ended with the expected warnings for the legacy issues above, and none failed.
-`lakehouse_full_refresh` ran the same steps in Airflow with the same result.
+In Phase 4, `lakehouse_full_refresh` ran the same steps in Airflow with the same result; it was not
+rerun after Phase 6.
 
 ## Reproducibility
 

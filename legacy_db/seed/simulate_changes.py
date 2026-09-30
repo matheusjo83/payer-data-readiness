@@ -22,6 +22,8 @@ from datetime import datetime, timedelta
 
 import psycopg
 
+from claim_details import claim_details
+
 # Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
 PG_DSN = os.environ.get(
     "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
@@ -120,20 +122,24 @@ class Simulator:
         mbr_id = random.choice(list(self.active_coverage))
         svc = max(self.active_coverage[mbr_id], now.date() - timedelta(days=random.randint(1, 30)))
         charges = [round(random.uniform(40, 1500), 2) for _ in range(random.randint(1, 4))]
+        claim_type = random.choices(["P", "I", "R"], [70, 20, 10])[0]
+        header, line_details = claim_details(random, claim_type, svc, svc, len(charges))
         cur.execute(
             "INSERT INTO clm_hdr (clm_id, mbr_id, prv_id, clm_typ_cd, svc_from_dt, svc_to_dt, rcvd_dt, "
-            "adj_dt, clm_stat_cd, tot_chrg_amt, tot_pd_amt, upd_ts) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, '', 'PN', %s, 0, %s)",
-            [clm_id, mbr_id, random.choice(self.provider_ids),
-             random.choices(["P", "I", "R"], [70, 20, 10])[0], ymd(svc), ymd(svc), ymd(now),
-             round(sum(charges), 2), now],
+            "adj_dt, clm_stat_cd, tot_chrg_amt, tot_pd_amt, ntwk_cd, bill_typ_cd, pos_cd, days_sply, "
+            "daw_cd, rfl_nbr, rfl_auth, upd_ts) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, '', 'PN', %s, 0, %s, %s, %s, %s, %s, %s, %s, %s)",
+            [clm_id, mbr_id, random.choice(self.provider_ids), claim_type, ymd(svc), ymd(svc), ymd(now),
+             round(sum(charges), 2), header["ntwk_cd"], header["bill_typ_cd"], header["pos_cd"],
+             header["days_sply"], header["daw_cd"], header["rfl_nbr"], header["rfl_auth"], now],
         )
-        for ln, chrg in enumerate(charges, start=1):
+        for ln, (chrg, details) in enumerate(zip(charges, line_details), start=1):
+            proc_cd = random.choice(PROC_CODES)
             cur.execute(
-                "INSERT INTO clm_ln (clm_id, ln_nbr, proc_cd, dx_cd, units, chrg_amt, pd_amt, upd_ts) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 0, %s)",
-                [clm_id, ln, random.choice(PROC_CODES), random.choice(DX_CODES),
-                 random.randint(1, 3), chrg, now],
+                "INSERT INTO clm_ln (clm_id, ln_nbr, proc_cd, dx_cd, units, chrg_amt, pd_amt, "
+                "ndc_cd, rev_cd, upd_ts) VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s)",
+                [clm_id, ln, None if claim_type == "R" else proc_cd, random.choice(DX_CODES),
+                 random.randint(1, 3), chrg, details["ndc_cd"], details["rev_cd"], now],
             )
         return True
 
