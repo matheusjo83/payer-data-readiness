@@ -86,13 +86,13 @@ models:
       - name: timeframe_hours
         description: Applicable CMS-0057-F timeframe in hours (72 or 168).
       - name: decision_hours
-        description: Hours from request to decision. Null while pending.
+        description: Elapsed hours from request to decision. Null while pending.
       - name: within_timeframe
         description: True when decided within the timeframe. Null while pending.
 
   - name: fct_member_months
     description: >
-      One row per member and calendar month of coverage, up to the current month.
+      One row per member and calendar month of coverage, up to the month of the reference date (var as_of_date).
       Standard denominator for utilization and cost metrics (e.g. claims per 1,000 member months).
     data_tests:
       - unique_combination:
@@ -145,7 +145,7 @@ models:
       - name: coverage_end_date
         description: "{{ doc('coverage_end_date') }}"
       - name: is_currently_covered
-        description: True when the most recent coverage span includes today.
+        description: True when the most recent coverage span includes the reference date (var as_of_date).
         data_tests: [not_null]
 
   - name: dim_plan

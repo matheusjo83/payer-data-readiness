@@ -13,10 +13,12 @@ authorization figures differ from the ones published in Phase 1 (see the git his
 
 When the generators were pinned (see Reproducibility), the Synthea figures changed: the earlier
 ones came from Synthea's continuous build, simulated up to the moment it ran, and could not be
-produced again. The expedited mean decision time also moved from 30.8 h to 30.7 h, because the
-legacy timestamps are now anchored to midnight of the reference date instead of the time of day
-the generator ran, and decision times are counted in whole minutes. The legacy data itself did
-not change.
+produced again. The expedited mean decision time also moved from 30.8 h to 30.7 h. That change
+came from a measurement error, not from the data: the model counted minute boundaries crossed
+(`date_diff('minute', ...)`) instead of elapsed time, so the figure depended on the seconds of each
+timestamp, and anchoring the legacy timestamps to midnight of the reference date shifted them.
+The model now measures elapsed time, and the expedited mean is 30.8 h again (30.76 h; with the
+old calculation, 30.75 h). No other prior authorization figure changed.
 
 ## Metrics
 
@@ -72,7 +74,7 @@ requests have no decision timestamp and are left out of the timing figures.
 
 | Request type | Requests | Decided | Pending | Mean decision time | Median decision time | Timeframe       | Within timeframe       |
 |--------------|---------:|--------:|--------:|-------------------:|---------------------:|-----------------|------------------------|
-| Expedited    |      638 |     612 |      26 |             30.7 h |               21.1 h | 72 h            | 557 of 612 (91.0%)     |
+| Expedited    |      638 |     612 |      26 |             30.8 h |               21.1 h | 72 h            | 557 of 612 (91.0%)     |
 | Standard     |    2,362 |   2,241 |     121 |             85.9 h |               59.9 h | 168 h (7 days)  | 1,927 of 2,241 (86.0%) |
 
 The generator draws decision times from exponential distributions (means of 30 h for
@@ -181,7 +183,7 @@ passed, 5 ended with the expected warnings for the legacy issues above, and none
 
 ## Reproducibility
 
-Both data generators are pinned, so the results do not depend on the day they run:
+Both data generators and the gold models are pinned, so the results do not depend on the day they run:
 
 - **Legacy source.** `generate_legacy_data.py` anchors every date to `--as-of` (default
   2026-09-28) instead of the current date, with a fixed seed (42). Pass `--as-of YYYY-MM-DD` to
@@ -193,6 +195,10 @@ Both data generators are pinned, so the results do not depend on the day they ru
   (`END_DATE`, `-e`, default the reference date). Without `-e`, Synthea simulates up to the moment
   it runs, so a run on a later day adds encounters and observations. All are variables at the top
   of the script; changing the version also requires changing `SYNTHEA_SHA256`.
+- **Gold models.** Wherever a model needs "today" (`fct_member_months`, and the
+  `is_currently_covered` flag in `dim_member`), it uses the dbt variable `as_of_date` (default
+  2026-09-28, the legacy generator's reference date) instead of `current_date`. Pass
+  `--vars '{as_of_date: YYYY-MM-DD}'` to `dbt build` to move it, together with `--as-of`.
 
 With the defaults, repeated runs produce the same legacy rows and the same Synthea resources, with
 the same IDs and the same counts of each type. Two things in the Synthea output are not stable:
@@ -204,5 +210,4 @@ resource types, so none of the figures above depend on them.
 
 Some figures still vary between runs: load times and CDC latency depend on the machine and on
 timing, and the activity simulator (`make changes`) runs in real time without a fixed seed by
-default. `gold.fct_member_months` counts months up to the day `dbt build` runs (`current_date`),
-so it grows as time passes.
+default.

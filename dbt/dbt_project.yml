@@ -7,6 +7,12 @@ model-paths: ["models"]
 macro-paths: ["macros"]
 test-paths: ["tests"]
 
+vars:
+  # Reference date for "current" in the gold models (coverage status, member
+  # months). Pinned to the legacy generator's --as-of so results do not depend
+  # on the day dbt runs; override with --vars '{as_of_date: YYYY-MM-DD}'.
+  as_of_date: "2026-09-28"
+
 models:
   payer_data_readiness:
     staging:

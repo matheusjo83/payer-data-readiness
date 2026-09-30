@@ -1,5 +1,5 @@
 -- Member months: one row per member, plan and calendar month of coverage,
--- up to the current month. The standard denominator for payer utilization
+-- up to the month of the reference date (var as_of_date). The standard denominator for payer utilization
 -- and cost metrics (e.g. claims per 1,000 member months).
 with spans as (
     select
@@ -7,10 +7,10 @@ with spans as (
         e.plan_id,
         p.line_of_business,
         date_trunc('month', e.coverage_start_date)                           as first_month,
-        date_trunc('month', least(coalesce(e.coverage_end_date, current_date), current_date)) as last_month
+        date_trunc('month', least(coalesce(e.coverage_end_date, {{ as_of_date() }}), {{ as_of_date() }})) as last_month
     from {{ ref('stg_legacy__eligibility') }} e
     left join {{ ref('stg_legacy__plans') }} p using (plan_id)
-    where e.coverage_start_date <= current_date
+    where e.coverage_start_date <= {{ as_of_date() }}
 )
 
 select
