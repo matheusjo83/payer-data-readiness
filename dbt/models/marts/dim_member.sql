@@ -1,5 +1,6 @@
 -- Member dimension: deduplicated demographics plus the member's most recent
--- coverage span and plan.
+-- coverage span and plan. "Currently covered" is evaluated on the reference
+-- date (var as_of_date), not the day dbt runs.
 with latest_coverage as (
     select *
     from {{ ref('stg_legacy__eligibility') }}
@@ -23,8 +24,8 @@ select
     e.coverage_start_date,
     e.coverage_end_date,
     coalesce(
-        e.coverage_start_date <= current_date
-        and (e.coverage_end_date is null or e.coverage_end_date >= current_date),
+        e.coverage_start_date <= {{ as_of_date() }}
+        and (e.coverage_end_date is null or e.coverage_end_date >= {{ as_of_date() }}),
         false
     )                                           as is_currently_covered
 from {{ ref('stg_legacy__members') }} m

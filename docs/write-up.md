@@ -314,9 +314,10 @@ null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing requ
 - **Reproducibility.** Both generators are pinned: the legacy generator anchors its dates to a
   reference date (`--as-of`) instead of the day it runs, and the Synthea script downloads a fixed
   release (v4.0.0, checked by SHA-256) and runs it with fixed seeds, a fixed reference date and a
-  fixed end date (without the end date, Synthea simulates up to the moment it runs). What still
+  fixed end date (without the end date, Synthea simulates up to the moment it runs). The gold
+  models use a pinned reference date (the dbt variable `as_of_date`) instead of `current_date`. What still
   varies is timing: load times, CDC latency and the activity simulator, which runs in real time
-  without a fixed seed. Member months also grow with the date `dbt build` runs, and Synthea
+  without a fixed seed. Synthea
   leaves a few allergy details (CarePlan activities, a reaction severity) unstable between runs,
   in resource types no model reads.
 - **The compiler.** It covers the FHIRPath features the shareable tests exercise, without the
