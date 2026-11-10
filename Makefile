@@ -21,10 +21,11 @@ pbm:       ## Generate the synthetic PBM feed (members, pharmacies, claims) from
 synthea:   ## Generate synthetic FHIR R4 data with Synthea
 	bash scripts/generate_synthea.sh
 
-ingest:    ## Snapshot (first run) or sync legacy changes via CDC, and load FHIR NDJSON and the PBM feed into bronze
+ingest:    ## Snapshot (first run) or sync legacy changes via CDC, and load FHIR NDJSON, the PBM feed and the code system releases into bronze
 	$(PY) ingestion/cdc_legacy.py sync
 	$(PY) ingestion/load_fhir.py
 	$(PY) ingestion/load_pbm.py
+	$(PY) ingestion/load_terminology.py
 
 cdc:       ## Stream legacy changes into bronze continuously (Ctrl+C to stop)
 	$(PY) ingestion/cdc_legacy.py sync --follow --interval 5
@@ -67,8 +68,8 @@ airflow-down: ## Stop Airflow (the legacy database keeps running)
 fhir-validate: ## Validate a sample of the legacy-derived FHIR resources against base FHIR R4 (Java)
 	$(PY) fhir/validate.py
 
-fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0 profiles, with references resolved (Java)
-	$(PY) fhir/validate.py --ig carin-bb --top 60
+fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0 profiles, with references resolved and codes checked by tx.fhir.org (Java)
+	$(PY) fhir/validate.py --ig carin-bb --top 60 --tx https://tx.fhir.org
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

@@ -1,0 +1,58 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "eob_codes",
+  "status": "draft",
+  "resource": "ExplanationOfBenefit",
+  "select": [
+    {
+      "column": [
+        { "name": "eob_id", "path": "getResourceKey()", "type": "id" },
+        { "name": "service_date", "path": "billablePeriod.start", "type": "date" }
+      ]
+    },
+    {
+      "unionAll": [
+        {
+          "forEach": "diagnosis.diagnosisCodeableConcept.coding",
+          "column": [
+            { "name": "element", "path": "'diagnosis'", "type": "string" },
+            { "name": "code_system", "path": "system", "type": "uri" },
+            { "name": "code", "path": "code", "type": "code" }
+          ]
+        },
+        {
+          "forEach": "item.productOrService.coding",
+          "column": [
+            { "name": "element", "path": "'item.productOrService'", "type": "string" },
+            { "name": "code_system", "path": "system", "type": "uri" },
+            { "name": "code", "path": "code", "type": "code" }
+          ]
+        },
+        {
+          "forEach": "item.revenue.coding",
+          "column": [
+            { "name": "element", "path": "'item.revenue'", "type": "string" },
+            { "name": "code_system", "path": "system", "type": "uri" },
+            { "name": "code", "path": "code", "type": "code" }
+          ]
+        },
+        {
+          "forEach": "item.location.ofType(CodeableConcept).coding",
+          "column": [
+            { "name": "element", "path": "'item.location'", "type": "string" },
+            { "name": "code_system", "path": "system", "type": "uri" },
+            { "name": "code", "path": "code", "type": "code" }
+          ]
+        },
+        {
+          "forEach": "supportingInfo.code.coding",
+          "column": [
+            { "name": "element", "path": "'supportingInfo.code'", "type": "string" },
+            { "name": "code_system", "path": "system", "type": "uri" },
+            { "name": "code", "path": "code", "type": "code" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: terminology
+    description: >
+      Public code system releases loaded as reference data by `ingestion/load_terminology.py`
+      (bronze layer): ICD-10-CM from CMS, one release per fiscal year, and the FDA National Drug
+      Code Directory. Licensed code systems (CPT, NUBC revenue codes) are not loaded.
+    schema: bronze
+    tables:
+      - name: releases
+        identifier: terminology_releases
+        description: One row per loaded release, with its URL and SHA-256 (the NDC directory also with its publication date).
+      - name: icd10cm
+        identifier: terminology_icd10cm
+        description: CMS ICD-10-CM order files, FY2021 to FY2026, categories and codes, as published (no dots).
+      - name: ndc_package
+        identifier: terminology_ndc_package
+        description: FDA NDC Directory package file, as published (all columns as text).

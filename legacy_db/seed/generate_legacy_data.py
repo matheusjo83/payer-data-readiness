@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 
 import psycopg
 
-from claim_details import claim_details
+from claim_details import claim_details, diagnosis_on
 
 # Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
 PG_DSN = os.environ.get(
@@ -185,7 +185,7 @@ def main() -> None:
             pd = 0.0 if status in ("DN", "PN", "VD") else round(chrg * random.uniform(0.3, 0.9), 2)
             tot_chrg += chrg
             tot_pd += pd
-            claim_lines.append([cid, ln, random.choice(PROC_CODES), random.choice(DX_CODES),
+            claim_lines.append([cid, ln, random.choice(PROC_CODES), diagnosis_on(random.choice(DX_CODES), svc),
                                 random.randint(1, 3), chrg, pd])
         if status == "PD" and random.random() < RATE_PAID_GT_CHARGED:
             tot_pd = tot_chrg * random.uniform(1.05, 1.5)
