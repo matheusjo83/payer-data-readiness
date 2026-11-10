@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt review coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
@@ -46,6 +46,13 @@ conformance: ## Run the official SQL on FHIR v2 test suite against the ViewDefin
 
 dbt:       ## Build silver and gold layers and run data tests
 	cd dbt && dbt build --profiles-dir .
+
+review:    ## Work the identity review queue as a simulated reviewer (ground truth) until it is empty; writes dbt/seeds/identity_review_decisions.csv
+	@for round in 1 2 3 4 5; do \
+	  $(PY) scripts/review_identity_queue.py; rc=$$?; \
+	  if [ $$rc -eq 0 ]; then exit 0; elif [ $$rc -ne 3 ]; then exit $$rc; fi; \
+	  (cd dbt && dbt build --profiles-dir . -s identity_review_decisions+) > /dev/null || exit 1; \
+	done; echo "The review queue is not empty after 5 rounds"; exit 1
 
 coverage:  ## Documentation and test coverage of the dbt models (writes dbt/target/coverage.json)
 	cd dbt && dbt docs generate --profiles-dir .

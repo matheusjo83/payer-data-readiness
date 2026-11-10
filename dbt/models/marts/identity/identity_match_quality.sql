@@ -1,14 +1,17 @@
 -- Identity resolution measured against the generator's ground truth
 -- (source pbm.truth), for the deterministic baseline and the Splink links in
--- gold.member_xref. The only model that reads the truth.
+-- gold.member_xref: by the model alone (splink) and after the review decisions
+-- (splink_reviewed). With identity_dedupe_quality, the only models that read the
+-- truth.
 --
 -- scope 'all' covers every cardholder; the other scopes break the results down
 -- by injected variation (a cardholder with two variations counts in both) and by
--- kind of person the payer does not know (pbm_only, same_name, twin).
+-- kind of record other than a member's first cardholder ID (duplicate, pbm_only,
+-- same_name, twin).
 --   linked_correct  linked to the right member
 --   linked_wrong    linked to a member that is not the person (false positive)
 --   not_linked      a legacy member left unlinked (false negative; review or unmatched)
---   in_review       sent to human review (Splink only)
+--   in_review       waiting for human review (Splink only)
 with truth as (
     select cardholder_id, nullif(member_id, '') as true_member_id, "case" as kind,
            string_split(nullif(variations, ''), ';') as variations
@@ -21,7 +24,11 @@ decisions as (
     from truth t
     left join {{ ref('identity_matches_deterministic') }} d using (cardholder_id)
     union all
-    select 'splink', x.cardholder_id, x.member_id, x.status = 'review'
+    select 'splink', x.cardholder_id, case when x.model_status = 'linked' then x.candidate_member_id end,
+           x.model_status = 'review'
+    from {{ ref('member_xref') }} x
+    union all
+    select 'splink_reviewed', x.cardholder_id, x.member_id, x.status = 'review'
     from {{ ref('member_xref') }} x
 ),
 

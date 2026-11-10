@@ -6,7 +6,10 @@ The same person appears in both sources with the variations real feeds have:
 nicknames, typos, a changed last name, transposed or mistyped birth dates, an
 old address. The feed also holds people the payer does not know, including
 deliberate look-alikes (same name and address, different birth date; same last
-name, birth date and address, different first name).
+name, birth date and address, different first name). Some people also hold a
+second cardholder ID, as when a PBM reissues a card after re-enrollment: the
+duplicate is keyed again, with an address change or a keying difference, and
+gets claims of its own.
 
 Every variation is injected at a documented rate and recorded in a ground-truth
 file (_truth.txt), so the identity resolution can be measured, as the legacy
@@ -20,7 +23,7 @@ Files are pipe-delimited, as PBM files often are, written to data/pbm/:
     pbm_members.txt     cardholder_id|first_name|last_name|birth_date|gender|zip_code|state
     pbm_pharmacies.txt  pharmacy_id|npi|pharmacy_name|state|updated_at
     pbm_claims.txt      one row per pharmacy claim, keyed by cardholder_id
-    _truth.txt          cardholder_id|member_id|case|variations
+    _truth.txt          cardholder_id|member_id|case|variations|duplicate_of
 
 Usage:
     python scripts/generate_pbm_feed.py
@@ -59,6 +62,16 @@ RATE_SAME_NAME = 0.01         # a member's name, zip and gender, different birth
 RATE_TWIN = 0.005             # a member's last name, birth date and zip, other first name
 # Claims outside the member's coverage (held back by the FHIR integrity gate).
 RATE_FILL_OUTSIDE_COVERAGE = 0.01
+# Second cardholder IDs for the same person, relative to the members and
+# PBM-only people (not the look-alikes). Drawn from their own random generator
+# after everything else, so the rest of the feed is the same with or without them.
+RATE_DUPLICATE = 0.03
+# Variations of a duplicate record, applied independently.
+RATE_DUP_ZIP_MOVED = 0.40
+RATE_DUP_NICKNAME = 0.10      # nickname if the name has one, else a typo
+RATE_DUP_FIRST_TYPO = 0.05
+RATE_DUP_LAST_TYPO = 0.05
+RATE_DUP_GENDER_MISSING = 0.05
 
 NICKNAMES = {"James": "Jim", "Mary": "Molly", "Robert": "Bob", "Patricia": "Pat", "John": "Jack",
              "Jennifer": "Jen", "Michael": "Mike", "Linda": "Lindy", "David": "Dave",
@@ -209,12 +222,13 @@ def main() -> None:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     members_rows, truth_rows, claim_rows = [], [], []
-    for n, (record, truth, spans) in enumerate(people, start=1):
+
+    def add_cardholder(rng: random.Random, n: int, record, truth, spans, duplicate_of: str = "") -> None:
         cardholder_id = f"RX{n:09d}"
         first, last, dob, gender, zip_code, state = record
         members_rows.append([cardholder_id, first.upper(), last.upper(),
                              dob.strftime("%m/%d/%Y") if dob else "", gender or "", zip_code, state])
-        truth_rows.append([cardholder_id, truth[0] or "", truth[1], truth[2]])
+        truth_rows.append([cardholder_id, truth[0] or "", truth[1], truth[2], duplicate_of])
         for _ in range(rng.choices([0, 1, 2, 3, 4], [15, 35, 25, 15, 10])[0]):
             if spans:
                 start, end = rng.choice(spans)
@@ -240,6 +254,39 @@ def main() -> None:
                 processed.strftime("%Y-%m-%d %H:%M:%S"),
             ])
 
+    for n, (record, truth, spans) in enumerate(people, start=1):
+        add_cardholder(rng, n, record, truth, spans)
+
+    # Second cardholder IDs, numbered after the others (a reissued card is newer).
+    dup_rng = random.Random(args.seed + 3)
+    originals = [(n, p) for n, p in enumerate(people, start=1) if p[1][1] in ("member", "pbm_only")]
+    duplicates = dup_rng.sample(originals, round(len(originals) * RATE_DUPLICATE))
+    duplicates.sort(key=lambda d: d[0])
+    for k, (n, (record, truth, spans)) in enumerate(duplicates, start=len(people) + 1):
+        first, last, dob, gender, zip_code, state = record
+        variations = []
+        if dup_rng.random() < RATE_DUP_ZIP_MOVED:
+            zip_code = f"{dup_rng.randint(73301, 79999)}"
+            variations.append("zip_moved")
+        if dup_rng.random() < RATE_DUP_NICKNAME:
+            if first in NICKNAMES:
+                first = NICKNAMES[first]
+                variations.append("nickname")
+            else:
+                first = typo(dup_rng, first)
+                variations.append("first_typo")
+        if dup_rng.random() < RATE_DUP_FIRST_TYPO:
+            first = typo(dup_rng, first)
+            variations.append("first_typo")
+        if dup_rng.random() < RATE_DUP_LAST_TYPO:
+            last = typo(dup_rng, last)
+            variations.append("last_typo")
+        if dup_rng.random() < RATE_DUP_GENDER_MISSING:
+            gender = None
+            variations.append("gender_missing")
+        add_cardholder(dup_rng, k, [first, last, dob, gender, zip_code, state],
+                       [truth[0], "duplicate", ";".join(variations)], spans, duplicate_of=f"RX{n:09d}")
+
     def write(name: str, header: list[str], rows: list[list]) -> None:
         with (OUT_DIR / name).open("w", newline="") as f:
             w = csv.writer(f, delimiter="|", lineterminator="\n")
@@ -253,10 +300,11 @@ def main() -> None:
                              "days_supply", "daw_code", "refill_number", "refills_authorized",
                              "pharmacy_id", "network_code", "ingredient_cost", "patient_pay",
                              "plan_paid", "claim_status", "processed_at"], claim_rows)
-    write("_truth.txt", ["cardholder_id", "member_id", "case", "variations"], truth_rows)
+    write("_truth.txt", ["cardholder_id", "member_id", "case", "variations", "duplicate_of"], truth_rows)
     cases = {}
     for _, t, _ in people:
         cases[t[1]] = cases.get(t[1], 0) + 1
+    cases["duplicate"] = len(duplicates)
     print(f"PBM feed: {len(members_rows)} cardholders ({cases}), {len(pharmacies)} pharmacies, "
           f"{len(claim_rows)} claims, as of {args.as_of}. Written to {OUT_DIR}/")
 
