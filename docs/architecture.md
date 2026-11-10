@@ -9,9 +9,11 @@ The architecture diagram and the layer table are in the [README](../README.md#ar
 
 Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_pbm_claims`,
 `fct_member_months`, `fct_prior_auth_timeliness`; the quality and reliability models
-`dq_issue_summary`, `load_reliability`, `cdc_latency` and `fhir_view_parity`; the identity
-resolution models (`identity_people`, `identity_matches_deterministic`, `identity_matches_splink`,
-`member_xref`, `identity_review_queue`, `identity_match_quality`); the FHIR resources built from the
+`dq_issue_summary`, `load_reliability`, `cdc_latency`, `cdc_slot_lag`, `fhir_view_parity` and
+`terminology_code_check`; the identity resolution models (`identity_people`,
+`identity_matches_deterministic`, `identity_matches_splink`, `identity_pbm_duplicates_splink`,
+`pbm_duplicate_pairs`, `pbm_persons`, `member_xref`, `identity_review_queue`,
+`identity_review_audit`, `identity_match_quality`, `identity_dedupe_quality`); the FHIR resources built from the
 legacy and PBM data (`fhir_patient`, `fhir_coverage`, `fhir_explanation_of_benefit`,
 `fhir_organization`); and the SQL on FHIR view outputs (`vd_synthea__*`, `vd_legacy__*`).
 
@@ -82,7 +84,7 @@ replication slot (wal2json). It does not change the legacy tables and it capture
 | DAG                      | Schedule          | Tasks                                                   |
 |--------------------------|-------------------|---------------------------------------------------------|
 | `legacy_cdc_refresh`     | every 30 minutes  | `cdc_sync` → `dbt_build`                                |
-| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `load_pbm` → `views_check` → `dbt_build` → `dbt_coverage` |
+| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `load_pbm` → `load_terminology` → `views_check` → `dbt_build` → `dbt_coverage` |
 | `cdc_slot_monitor`       | every 5 minutes   | `slot_check` (fails when the replication slot needs attention) |
 
 All DAGs start paused. Design choices:
@@ -152,11 +154,18 @@ providers (clinics) are Organization resources that the other resources referenc
   the CARIN Blue Button 2.1.0 package on a reproducible sample: 200 resources per resource type and
   per ExplanationOfBenefit profile, each in a Bundle with the resources it references, so references
   resolve and referenced resources are checked against their target profiles. CI runs it on every
-  pull request. `make fhir-validate` checks the same kind of sample against base FHIR R4 only.
-  Terminology is not checked (`-tx n/a`): the validator checks structure, cardinality, data types,
-  slices, invariants and value sets it can expand locally, but not whether CPT, ICD-10-CM or NDC
-  codes exist. Codes from code systems distributed only as stubs (the NCPDP dispense as written
-  code) are counted as unverified instead of failing the run.
+  pull request, with tx.fhir.org as the terminology server, so codes are checked too. `make
+  fhir-validate` checks the same kind of sample against base FHIR R4 only, without a terminology
+  server (`-tx n/a`). Codes from code systems the server does not have (NUBC revenue codes, the
+  NCPDP dispense as written code) are counted as unverified instead of failing the run.
+- **Terminology, on every resource.** The validator sees a sample. `ingestion/load_terminology.py`
+  loads the public code lists into bronze: the CMS ICD-10-CM releases for FY2021 to FY2026 (pinned
+  by SHA-256) and the FDA NDC Directory (only the current one exists; its date and SHA-256 are
+  recorded); the CMS place of service codes are a seed. `gold.terminology_code_check` reads every
+  code in the exported ExplanationOfBenefit resources through a ViewDefinition (`eob_codes`) and
+  checks it on the service date: an ICD-10-CM code must be billable in that fiscal year's release,
+  and an NDC listed and marketed. Licensed code systems (CPT, NUBC) and the NCPDP stub are
+  reported as unverified. `assert_terminology_codes_valid` fails the build on an invalid code.
 
 ## The PBM feed and identity resolution
 
@@ -179,17 +188,31 @@ Identity resolution happens in the data layer, before anything reaches the API:
   [Splink](https://moj-analytical-services.github.io/splink/) (Fellegi-Sunter) on an in-memory
   DuckDB with one thread, so its working tables stay out of the lakehouse and its scores are the
   same on every run. It is trained without labels.
+- **Deduplication within the PBM.** A PBM can reissue a card and key the same person again.
+  `identity_pbm_duplicates_splink` runs the same comparisons with Splink's `dedupe_only` link type
+  on the cardholders alone; `pbm_duplicate_pairs` merges a pair automatically only when the match
+  is strong, the first names do not disagree completely and the payer's records do not say they
+  are two different members; `pbm_persons` groups merged pairs into persons.
 - **Decisions.** `member_xref` links a cardholder automatically only when the match is strong, the
   first names do not disagree completely (relatives such as twins share last name, birth date and
-  address), there is no second likely candidate and no other cardholder claims the member. Likely
-  matches that fail a condition go to `identity_review_queue`, with both records side by side,
-  instead of being merged. Thresholds are dbt variables (`identity_auto_link_probability`,
-  `identity_review_probability`).
-- **Measurement.** `identity_match_quality` compares both methods with the ground truth, overall and
-  by variation; it is the only model that reads the truth. The test
-  `assert_identity_match_quality` fails the build if an automatic link is wrong or recall falls
-  below 95%.
-- **FHIR.** A linked member's Patient carries the PBM cardholder ID as a second member identifier.
+  address), there is no second likely candidate and no other PBM person claims the member (the
+  cardholder IDs of one person may share a member). Likely matches and likely duplicates that fail a
+  condition go to `identity_review_queue`, with both records side by side, instead of being merged.
+  Thresholds are dbt variables (`identity_auto_link_probability`, `identity_review_probability`).
+- **Review.** Reviewers' decisions are a versioned dbt seed, `identity_review_decisions`, applied
+  over the model: a `match` can pick any scored candidate, a `no_match` keeps the records apart.
+  `member_xref` and `pbm_duplicate_pairs` keep the model's own decision next to the final one and
+  record who decided. `identity_review_audit` shows whether each decision still applies (the model
+  must still propose the case it decided); stale ones raise a warning test and the case returns to
+  the queue. `scripts/review_identity_queue.py` (`make review`) simulates a reviewer from the ground
+  truth, so its results are an upper bound.
+- **Measurement.** `identity_match_quality` compares the methods with the ground truth, overall and
+  by variation, before and after review; `identity_dedupe_quality` does the same for duplicates.
+  They and the simulated reviewer are the only readers of the truth. `assert_identity_match_quality`
+  fails the build if an automatic link is wrong or recall falls below 95%, or if a link is wrong
+  after review; `assert_identity_dedupe_quality` fails on a wrong merge, and
+  `assert_member_linked_to_one_person` if two PBM persons share a member.
+- **FHIR.** A linked member's Patient carries each of the person's PBM cardholder IDs as a member identifier.
   PBM claims of linked members with coverage on the fill date become ExplanationOfBenefit
   resources (Pharmacy profile) that reference the member's Patient and Coverage and the pharmacy's
   Organization; the view parity and the CARIN validation cover them as a separate sample. Claims
