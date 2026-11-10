@@ -133,7 +133,7 @@ class Simulator:
              round(sum(charges), 2), header["ntwk_cd"], header["bill_typ_cd"], header["pos_cd"],
              header["days_sply"], header["daw_cd"], header["rfl_nbr"], header["rfl_auth"], now],
         )
-        for ln, (chrg, details) in enumerate(zip(charges, line_details), start=1):
+        for ln, (chrg, details) in enumerate(zip(charges, line_details, strict=True), start=1):
             proc_cd = random.choice(PROC_CODES)
             cur.execute(
                 "INSERT INTO clm_ln (clm_id, ln_nbr, proc_cd, dx_cd, units, chrg_amt, pd_amt, "

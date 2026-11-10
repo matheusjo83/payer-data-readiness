@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt review coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt review coverage fhir-validate fhir-validate-carin docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
@@ -73,5 +73,9 @@ fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .
+
+docs-static: ## Write the dbt docs as one static page (dbt/static_index.html), with the local path removed
+	cd dbt && dbt docs generate --static --profiles-dir .
+	sed 's#$(CURDIR)/dbt#.#g' dbt/target/static_index.html > dbt/static_index.html
 
 all: up seed pbm synthea ingest dbt

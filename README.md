@@ -110,6 +110,7 @@ make dbt       # build silver/gold layers and run data tests
 make review    # optional: work the identity review queue as a simulated reviewer (rewrites the decisions seed)
 make coverage  # documentation and test coverage of the dbt models
 make docs      # browse models and the lineage graph
+make docs-static  # write the dbt docs as one static page (dbt/static_index.html)
 ```
 
 FHIR (Phases 4 and 6):

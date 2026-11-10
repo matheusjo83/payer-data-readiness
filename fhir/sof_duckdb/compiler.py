@@ -146,8 +146,10 @@ def compile_binary(node, ctx: Ctx) -> str:
 
     if op in ("=", "!="):
         def eq(a, b):
-            norm = lambda coll: (lambda i: f"list_transform({coll}, lambda {i}: CASE WHEN json_type({i}) IN {NUMERIC} "
-                                           f"THEN CAST(CAST({i} AS DOUBLE) AS VARCHAR) ELSE CAST({i} AS VARCHAR) END)")(fresh("n"))
+            def norm(coll):
+                i = fresh("n")
+                return (f"list_transform({coll}, lambda {i}: CASE WHEN json_type({i}) IN {NUMERIC} "
+                        f"THEN CAST(CAST({i} AS DOUBLE) AS VARCHAR) ELSE CAST({i} AS VARCHAR) END)")
             result = (f"(CASE WHEN len({a}) = 0 OR len({b}) = 0 THEN NULL "
                       f"WHEN len({a}) <> len({b}) THEN false ELSE {norm(a)} = {norm(b)} END)")
             return bool_result(result if op == "=" else f"(NOT {result})")

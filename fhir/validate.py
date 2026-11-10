@@ -225,7 +225,10 @@ def run_validator(extra_args: list[str] = (), tx: str = "n/a") -> dict:
 def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = None, top: int = 15,
               tx: str = "n/a") -> dict:
     # One OperationOutcome per file (a Bundle when several files were validated).
-    outcomes = [e["resource"] for e in results.get("entry", [])] if results.get("resourceType") == "Bundle" else [results]
+    if results.get("resourceType") == "Bundle":
+        outcomes = [e["resource"] for e in results.get("entry", [])]
+    else:
+        outcomes = [results]
     per_type = {t: Counter() for t in counts}
     messages = Counter()
     known_counts = Counter()
