@@ -2,7 +2,8 @@
 # the replication slot drill (monitoring alerts and recovery), dbt build (models
 # and data tests), the SQL on FHIR v2 test suite (shareable tests) and the HL7
 # FHIR validator on a sample of the legacy-derived resources against the CARIN
-# Blue Button 2.1.0 profiles (no terminology server).
+# Blue Button 2.1.0 profiles, with codes checked by tx.fhir.org. dbt checks every
+# code against the CMS and FDA releases (gold.terminology_code_check).
 name: CI
 
 on:
@@ -49,6 +50,20 @@ jobs:
           path: ~/.fhir/packages
           key: fhir-packages-${{ hashFiles('fhir/validate.py') }}
 
+      # Code system releases (CMS ICD-10-CM, pinned by SHA-256; FDA NDC Directory, the
+      # current one). Keyed by the week, so the NDC Directory is at most a week old.
+      - name: Week
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache code system releases
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/terminology/*.zip
+            data/terminology/*.modified
+          key: terminology-${{ hashFiles('ingestion/load_terminology.py') }}-${{ steps.week.outputs.week }}
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
@@ -79,7 +94,7 @@ jobs:
       - name: SQL on FHIR conformance
         run: make conformance
 
-      - name: FHIR validation (CARIN Blue Button 2.1.0)
+      - name: FHIR validation (CARIN Blue Button 2.1.0, tx.fhir.org)
         run: make fhir-validate-carin
 
       - name: Upload reports

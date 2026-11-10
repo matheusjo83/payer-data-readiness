@@ -31,6 +31,21 @@ NDC_CODES = [
 ]
 
 
+# ICD-10-CM codes that stopped being valid for submission, with the code that
+# replaced them and the first day the replacement applies. M54.5 (low back pain)
+# became a category on 2021-10-01 (FY2022), split into M54.50, M54.51 and M54.59;
+# M54.50 (unspecified) is what a coder would use for the same diagnosis.
+DIAGNOSIS_REPLACEMENTS = {"M54.5": ("M54.50", date(2021, 10, 1))}
+
+
+def diagnosis_on(code: str, service_date: date) -> str:
+    """The diagnosis code as it is billed on the service date (no random draw)."""
+    replacement = DIAGNOSIS_REPLACEMENTS.get(code)
+    if replacement and service_date >= replacement[1]:
+        return replacement[0]
+    return code
+
+
 def claim_details(rng: random.Random, claim_type: str, svc_from: date, svc_to: date,
                   n_lines: int) -> tuple[dict, list[dict]]:
     """Header fields and per-line fields for one claim (legacy column names).

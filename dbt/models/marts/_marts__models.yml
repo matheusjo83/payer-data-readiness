@@ -352,6 +352,48 @@ models:
       - name: last_retained_mb
         description: WAL retained for the slot in the most recent observation, in MB (MiB).
 
+  - name: terminology_code_check
+    description: >
+      Codes from external code systems in the exported ExplanationOfBenefit resources, read
+      through the `eob_codes` ViewDefinition and checked against the code system on the service
+      date: ICD-10-CM against the CMS release of the fiscal year (billable codes only), NDC
+      against the FDA NDC Directory (marketed on the service date), place of service against the
+      CMS code set (seed). Covers every exported resource, not a sample. CPT and NUBC revenue
+      codes are licensed and the NCPDP code system is distributed only as a stub, so their codes
+      are unverified. The test `assert_terminology_codes_valid` fails on any invalid code.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [element, code_system, code, status, reason]
+    columns:
+      - name: element
+        description: Where the code is in the resource (diagnosis, item.productOrService, item.revenue, item.location, supportingInfo.code).
+        data_tests: [not_null]
+      - name: code_system
+        description: Code system URI.
+        data_tests: [not_null]
+      - name: code
+        description: The code as the resource carries it.
+        data_tests: [not_null]
+      - name: status
+        description: valid, invalid or unverified.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [valid, invalid, unverified]
+      - name: reason
+        description: Why the code got its status (for valid ICD-10-CM codes, the fiscal year that applied).
+        data_tests: [not_null]
+      - name: resources
+        description: ExplanationOfBenefit resources carrying the code with this outcome.
+      - name: occurrences
+        description: Times the code appears with this outcome (a resource can carry it on several lines).
+      - name: first_service_date
+        description: Earliest service date with this outcome.
+      - name: last_service_date
+        description: Latest service date with this outcome.
+
   - name: fhir_view_parity
     description: >
       Rows found on only one side when a ViewDefinition output is compared with the table it

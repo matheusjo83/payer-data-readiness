@@ -39,6 +39,12 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   Phase 1. In Phase 6, Matheus chose how to handle the fields the legacy source lacked, the invalid
   gender codes and the references; in Phase 7, the second source (a PBM feed), the matching method
   (Splink compared with a deterministic baseline) and the scope (through FHIR).
+- **After v2.0.0** (terminology, and the review queue and deduplication in identity resolution)
+  the work continued the same way. Matheus chose how to check codes (tx.fhir.org in the CARIN
+  validation, plus the public CMS and FDA code lists checked in dbt against every resource, with
+  CPT left unverified because it is licensed) and how to finish identity resolution (reviewer
+  decisions as a versioned seed applied over the model, with an audit trail and a simulated
+  reviewer, and a second Splink model for duplicates within the PBM).
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -67,11 +73,17 @@ work he did himself. Work done by Claude Code is attributed to it.
   24,507 ExplanationOfBenefit and 301 Organization resources. Round trips through FHIR reproduce the
   source tables with zero differing rows, and the HL7 validator reports zero errors on a
   1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, with references resolved
-  (terminology not checked). Before remediation, every sampled resource failed those profiles.
+  and codes checked by tx.fhir.org. Before remediation, every sampled resource failed those
+  profiles. Every ICD-10-CM, NDC and place of service code in every exported claim is valid on its
+  service date against the CMS and FDA releases, after one diagnosis code the generator used turned
+  out to have been retired in 2021.
 - **Identity resolution with ground truth.** A PBM feed sends 2,900 of the members under its own
   IDs, with nicknames, typos, changed names, mistyped birth dates and old addresses, plus 275 people
-  the payer does not know. A Splink model links 2,847 correctly and none wrongly (recall 98.2%) and
-  sends 69 uncertain cases to review; exact rules link 2,719 correctly and 14 wrongly (recall 93.8%).
+  the payer does not know and 94 people with a second cardholder ID. A Splink model links 2,928 of
+  2,991 member cardholder IDs correctly and none wrongly (recall 97.9%) and sends 74 uncertain
+  cases to review; exact rules link 2,794 correctly and 14 wrongly (recall 93.4%). With the queue
+  worked by a simulated reviewer, recall reaches 98.9%, still with no wrong link, and 93 of the 94
+  duplicate IDs are merged, none wrongly.
 
 These figures describe synthetic data generated with a fixed seed. They show that the pipeline
 behaves as designed. They do not describe any real health plan.
@@ -210,7 +222,8 @@ in the expected warnings.
 For coverage, a small script written by Claude Code combines the dbt manifest (descriptions and tests) with
 the catalog (the columns that actually exist in the database). A column that exists but is missing
 from the documentation counts against coverage. Every model and column is documented, and every
-model has at least one test. Column-level test coverage is 38.0% in silver and 23.5% in gold. I
+model has at least one test. Column-level test coverage was 38.0% in silver and 23.5% in gold when
+this was first written, in Phase 3; after the work that followed v2.0.0 it is 37.0% and 22.9%. I
 publish those numbers as they are. The tests cover keys, relationships, allowed values, parity and
 the quality checks, and adding tests to descriptive columns only to raise the percentage would make
 the metric less honest, not the data more reliable.
@@ -418,13 +431,71 @@ One more reproducibility detail surfaced here. Splink's scores differed in the 1
 to run, because DuckDB adds up parallel sums in varying order. No decision changed, but the
 published scores should not depend on the thread scheduler, so the model runs on one thread.
 
+## Codes, checked against their code systems
+
+Validation without a terminology server checks the shape of a code, not whether it exists. Claude
+Code presented two ways to close that gap, and I chose to do both, as it recommended: run the
+CARIN validation against tx.fhir.org, the public HL7 terminology server, and check every code in
+every exported claim inside the lakehouse, against the code lists the US government publishes for
+free. The second matters because the validator sees 1,600 resources, and the API would serve
+29,224 claims. The ICD-10-CM releases come from CMS, one per fiscal year and pinned by SHA-256;
+the NDC Directory comes from the FDA; the place of service codes are a small seed. A dbt model
+reads the codes through a ViewDefinition, so it checks what the API would serve, and checks each
+one on its service date. CPT stays unverified: the AMA licenses it.
+
+The check found a real error on its first run. The legacy generator used M54.5, low back pain,
+which was a valid diagnosis code until September 30, 2021. On October 1 it became a category,
+split into M54.50, M54.51 and M54.59, and a category cannot be billed. Every claim here dates from
+2024 or later, so all 6,079 of those diagnoses were invalid, and the HL7 validator without a
+server could not have said so. The generator now writes M54.50 from that date. A test fails the
+build on any invalid code, and the check rejected each of four deliberately wrong codes.
+
+The two checks disagree on one point, and I left the disagreement visible. tx.fhir.org reports all
+ten NDCs as inactive, while the FDA directory lists every one of them as marketed, with no end
+date. The lakehouse follows the FDA, which publishes the code system, and the validator's warning
+stays in the results.
+
+## Working the review queue, and duplicates within a source
+
+Phase 7 ended with a review queue nobody worked and a PBM that was assumed to hold each person
+once. Claude Code presented the options for both, and I chose its recommendations.
+
+- **Decisions as data.** A reviewer's decision is a row in a versioned dbt seed (who, when, which
+  pair, match or no match), and the cross-reference applies it over the model. The model's own
+  decision stays next to the final one, and an audit model shows whether each decision still
+  applies: if the data changes and the model no longer proposes the case that was decided, the
+  decision stops applying and the case returns to the queue, with a warning.
+- **A simulated reviewer.** There are no reviewers here, so a script decides each case from the
+  ground truth and appends the decision to the seed. It is always right, so the results after
+  review are an upper bound; what they show is that the decisions flow through to the links, the
+  FHIR identifiers and the exported claims.
+- **Duplicates.** The generator now gives 3% of the people a second cardholder ID, keyed again with
+  a new address or a typo, as when a PBM reissues a card. A second Splink model deduplicates the
+  PBM's own records, under the same rules as the linkage, plus one more: when the payer's records
+  say the two cardholders are different members, they are not merged automatically.
+
+Duplicates made the linkage harder before they made it better. Two cardholder IDs of one person
+both point to the same member, which looks like two people claiming one member, so until the pair
+is merged both go to review; 20 of the 136 decisions are such cases. Once duplicates are grouped
+into persons, the IDs of one person may share a member, and deciding one case can put another in
+the queue, so the simulated reviewer runs in rounds until the queue is empty (on this data, the
+first round decided all 136 cases and the second found none). Started from an empty seed, it
+wrote the committed seed again, byte for byte. The model links 2,928 of the 2,991 member cardholder IDs with no wrong link; review adds
+30, all of them correct, and rejects 44 look-alikes and twins. The 33 still missing scored below
+the review threshold, so no reviewer ever sees them. That is the cost of the threshold, and it is
+the number to watch if this were real. Deduplication merges 80 of the 94 duplicate pairs on its
+own and 93 after review, none wrongly. A test now fails the build if a reviewed link is wrong; I
+checked that it fails by flipping one decision on a look-alike to a match.
+
 ## What this does not show, and what would change for production
 
-- **Terminology.** Validation checks the CARIN profiles without a terminology server, so it does
-  not check whether CPT, ICD-10-CM, NDC, revenue or place of service codes exist, and it counts the
-  NCPDP dispense as written code, whose code system is distributed only as a stub, as unverified. A
-  production Patient Access API would need a terminology server with licensed code systems, plus
-  narratives. Validation also covers a sample, not every resource.
+- **Terminology.** CPT and NUBC revenue codes are licensed, so nothing here checks them, and the
+  NCPDP dispense as written code is published only as a stub; all three are reported as
+  unverified. The NDC check depends on the FDA's current directory, which cannot be pinned, and
+  tx.fhir.org is a public test server whose content changes. A production Patient Access API would
+  need a terminology server of its own with the licensed code systems, plus narratives. The
+  validator covers a sample; the code check in dbt covers every resource, but only the code
+  systems it has.
 - **Scale and concurrency.** DuckDB's single writer shapes the orchestration. At scale, the next step
   would be to move to a table format with concurrent writers, such as Iceberg or Delta, and materialize the CDC
   current state incrementally instead of rebuilding it with a window function over all changes.
@@ -447,10 +518,10 @@ published scores should not depend on the thread scheduler, so the model runs on
   boundary functions. Real-world ViewDefinitions may use features beyond that set.
 - **Identity resolution.** The variations are generated, so they are cleaner than real ones: one
   kind of error at a time per field, from short name lists. The nickname dictionary covers the
-  generator's nicknames, so its benefit here is an upper bound. The model links the PBM to the
-  payer; it does not deduplicate within the PBM, and nobody works the review queue. A production
-  master patient index would add more sources and fields (phone, address lines, SSN fragments),
-  merge and unmerge history, and people who review the uncertain cases.
+  generator's nicknames, so its benefit here is an upper bound. The reviewer is simulated from the
+  ground truth, so the figures after review are an upper bound too: real reviewers make mistakes
+  and take time. A production master patient index would add more sources and fields (phone,
+  address lines, SSN fragments), an unmerge workflow, and people who review the uncertain cases.
 
 ## Lessons
 
@@ -461,7 +532,7 @@ published scores should not depend on the thread scheduler, so the model runs on
    rebuilt state against the source, not in unit-level checks.
 3. **Make tests prove they can fail.** A parity check or a validator that always passes is only
    evidence once you have seen it catch a deliberate error.
-4. **Publish the uncomfortable numbers.** Column test coverage of 23.5%, eight unimplemented
+4. **Publish the uncomfortable numbers.** Column test coverage of 22.9% in gold, eight unimplemented
    experimental tests and a 14-second view are part of the result. Hiding them would make every
    other number less credible.
 5. **Treat the data layer as the product.** An interoperability API can only be as reliable as the
@@ -472,6 +543,7 @@ published scores should not depend on the thread scheduler, so the model runs on
 ```bash
 make up && make seed && make pbm && make synthea && make ingest && make dbt
 make coverage conformance fhir-validate-carin
+make review   # optional: rewrites the review decisions seed from the ground truth
 ```
 
 Requirements and the CDC streaming demo are in the repository's README, and the Airflow setup is

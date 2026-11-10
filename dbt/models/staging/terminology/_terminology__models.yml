@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: stg_terminology__icd10cm
+    description: >
+      ICD-10-CM categories and codes, one row per code and CMS fiscal year (FY2021 to FY2026),
+      with the dot FHIR uses and the period the release applies to. Only billable codes are valid
+      on a claim; categories (such as M54.5 from FY2022 on) are not.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [fiscal_year, code]
+    columns:
+      - name: fiscal_year
+        description: CMS fiscal year of the release.
+        data_tests: [not_null]
+      - name: code
+        description: ICD-10-CM code with a dot after the third character, as in FHIR.
+        data_tests: [not_null]
+      - name: is_billable
+        description: True for codes valid for submission, false for categories (headers).
+        data_tests: [not_null]
+      - name: valid_from
+        description: First day of the fiscal year (October 1 of the previous year).
+      - name: valid_to
+        description: Last day of the fiscal year (September 30).
+      - name: description
+        description: Long description.
+
+  - name: stg_terminology__ndc
+    description: >
+      FDA NDC Directory packages keyed by the 11-digit NDC (5-4-2) used by claims and FHIR. The
+      directory is the current one, so a product that left the market long ago may be missing.
+    columns:
+      - name: ndc
+        description: 11-digit NDC without dashes.
+        data_tests: [unique, not_null]
+      - name: package_code
+        description: 10-digit package code with dashes, as the FDA publishes it.
+      - name: description
+        description: Package description.
+      - name: marketing_start_date
+        description: Start of marketing.
+      - name: marketing_end_date
+        description: End of marketing, if the package is no longer marketed.

@@ -166,8 +166,17 @@ platform.
   *In this repo:* `gold.identity_review_queue`; claims of unresolved cardholders are held back.
 - [ ] **Gate the build on matching quality** where the truth is known.
   *In this repo:* `dbt/tests/assert_identity_match_quality.sql`.
-- [ ] **Deduplication within each source, merge and unmerge history, and working the review queue.**
-  **Not covered here.**
+- [ ] **Deduplicate within each source too.** One source can hold the same person under two IDs
+  (a reissued card, a re-enrollment); merge them before linking, under the same rules and review.
+  *In this repo:* `gold.identity_pbm_duplicates_splink`, `gold.pbm_duplicate_pairs` and
+  `gold.pbm_persons`, measured by `gold.identity_dedupe_quality`.
+- [ ] **Record review decisions as versioned data, applied over the model.** Keep who decided,
+  when and why; keep the model's own decision next to the final one; and flag decisions the data
+  has made stale instead of applying them blindly.
+  *In this repo:* the seed `identity_review_decisions`, `gold.identity_review_audit` and the
+  warning test `assert_identity_review_decisions_apply`; `make review` simulates the reviewer.
+- [ ] **Unmerge history and real reviewers.** **Not covered here:** a decision can be replaced in
+  the seed, but there is no unmerge workflow, and the simulated reviewer reads the ground truth.
 
 ## 9. Validate and prove parity
 
@@ -191,9 +200,14 @@ platform.
   target profiles too, and check separately that every reference resolves: the HL7 validator does
   not report an unresolved reference inside a Bundle as an error.
   *In this repo:* `make fhir-validate-carin` (Bundles) and `dbt/tests/assert_fhir_references_resolve.sql`.
-- [ ] **Validate codes with a terminology server.**
-  **Not covered here** (`-tx n/a`). Without a server, clear the validator's terminology cache, or
-  the result depends on what earlier runs cached.
+- [ ] **Validate codes with a terminology server, and check every code against the published
+  code lists.** A server checks the sample; the code lists check all resources, on the service
+  date (an ICD-10-CM code valid one year can be a non-billable category the next). Clear the
+  validator's terminology cache on each run, or the result depends on what earlier runs cached.
+  Say which code systems stay unverified because they are licensed.
+  *In this repo:* `make fhir-validate-carin` with tx.fhir.org, and `gold.terminology_code_check`
+  (CMS ICD-10-CM, FDA NDC, CMS place of service) with `assert_terminology_codes_valid`; CPT and
+  NUBC revenue codes are unverified.
 
 ## 10. Report results people can trust
 

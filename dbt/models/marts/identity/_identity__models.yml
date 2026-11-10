@@ -86,17 +86,112 @@ models:
           arguments:
             columns: ['cardholder_id', 'member_id']
 
-  - name: member_xref
+  - name: identity_pbm_duplicates_splink
     description: >
-      Cross-reference of PBM cardholders to legacy members, one row per cardholder: linked
-      automatically, sent to human review, or unmatched (see the model for the rules).
+      Candidate pairs of PBM cardholders that may be the same person (a second cardholder ID),
+      scored by a Splink dedupe model with the same comparisons as identity_matches_splink,
+      trained without labels. Pairs with a match probability of at least 0.01, lower ID first.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [cardholder_id, other_cardholder_id]
+    columns:
+      - name: cardholder_id
+        description: The lower cardholder ID of the pair.
+        data_tests: [not_null]
+      - name: other_cardholder_id
+        description: The higher cardholder ID of the pair.
+        data_tests: [not_null]
+      - name: match_weight
+        description: Log2 Bayes factor of the pair.
+      - name: match_probability
+        description: Probability that the two cardholders are the same person.
+      - name: gamma_first_name
+        description: First name comparison level (see identity_matches_splink).
+      - name: gamma_last_name
+        description: Last name comparison level.
+      - name: gamma_birth_date
+        description: Birth date comparison level.
+      - name: gamma_gender
+        description: Gender comparison level.
+      - name: gamma_zip_code
+        description: ZIP code comparison level.
+
+  - name: pbm_duplicate_pairs
+    description: >
+      Likely duplicate pairs of PBM cardholders (match probability at or above
+      identity_review_probability) with the decision for each: merged automatically, sent to
+      review, or decided by a reviewer (see the model for the rules).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [cardholder_id, other_cardholder_id]
+    columns:
+      - name: cardholder_id
+        description: The lower cardholder ID of the pair.
+        data_tests: [not_null]
+      - name: other_cardholder_id
+        description: The higher cardholder ID of the pair.
+        data_tests: [not_null]
+      - name: match_probability
+        description: Probability that the two cardholders are the same person.
+      - name: first_name_disagrees
+        description: True when the first names disagree completely.
+      - name: linked_to_different_members
+        description: True when each cardholder has a strong legacy candidate and the candidates are different members.
+      - name: model_status
+        description: duplicate or review, by the model alone.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [duplicate, review]
+      - name: review_reason
+        description: >
+          Why the model sent the pair to review: probability_below_auto_link,
+          first_name_disagrees or different_legacy_members.
+      - name: status
+        description: duplicate, review or distinct, after the review decisions.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [duplicate, review, distinct]
+      - name: decided_by
+        description: model or review.
+      - name: reviewed_by
+        description: The reviewer, when a reviewer decided.
+      - name: reviewed_at
+        description: Date of the review decision.
+
+  - name: pbm_persons
+    description: >
+      PBM cardholders grouped into persons: connected components of the pairs decided to be
+      duplicates. One row per cardholder.
     columns:
       - name: cardholder_id
         description: "{{ doc('cardholder_id') }}"
         data_tests: [unique, not_null]
+      - name: pbm_person_id
+        description: The lowest cardholder ID of the person.
+        data_tests: [not_null]
+      - name: cardholders
+        description: Number of cardholder IDs the person holds.
+
+  - name: member_xref
+    description: >
+      Cross-reference of PBM cardholders to legacy members, one row per cardholder: linked
+      automatically, sent to human review, unmatched, or decided by a reviewer (see the model
+      for the rules). A member can be linked to several cardholders only when they are one PBM
+      person; the test assert_member_linked_to_one_person checks it.
+    columns:
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+        data_tests: [unique, not_null]
+      - name: pbm_person_id
+        description: The PBM person the cardholder belongs to (gold.pbm_persons).
+        data_tests: [not_null]
       - name: member_id
-        description: The linked member. Null unless status is linked; a member is linked to one cardholder at most.
-        data_tests: [unique]
+        description: The linked member. Null unless status is linked.
       - name: candidate_member_id
         description: Best Splink candidate, whatever the status.
       - name: match_probability
@@ -105,8 +200,15 @@ models:
         description: Match weight of the best candidate.
       - name: second_probability
         description: Match probability of the second-best candidate, if any.
+      - name: model_status
+        description: linked, review or unmatched, by the model alone, before any review decision.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['linked', 'review', 'unmatched']
       - name: status
-        description: linked, review or unmatched.
+        description: linked, review or unmatched, after the review decisions.
         data_tests:
           - not_null
           - accepted_values:
@@ -114,53 +216,105 @@ models:
                 values: ['linked', 'review', 'unmatched']
       - name: reason
         description: >
-          Why the cardholder was not linked: probability_below_auto_link, first_name_disagrees,
-          second_candidate, member_claimed_twice or no_likely_candidate.
+          Why the cardholder was not linked automatically: probability_below_auto_link,
+          first_name_disagrees, second_candidate, member_claimed_twice or no_likely_candidate;
+          confirmed_in_review or rejected_in_review when a reviewer decided.
+      - name: decided_by
+        description: model or review.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['model', 'review']
+      - name: reviewed_by
+        description: The reviewer, when a reviewer decided.
+      - name: reviewed_at
+        description: Date of the review decision.
 
   - name: identity_review_queue
-    description: Cardholders in review, with the PBM and legacy records side by side.
+    description: >
+      Cases waiting for a reviewer, with both records side by side: a cardholder and its best
+      legacy candidate (member_link), or two cardholders that may be one person (pbm_duplicate).
+      A case leaves the queue when the seed identity_review_decisions decides it.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [review_type, cardholder_id, candidate_id]
     columns:
+      - name: review_type
+        description: member_link or pbm_duplicate.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [member_link, pbm_duplicate]
       - name: cardholder_id
         description: "{{ doc('cardholder_id') }}"
-        data_tests: [unique, not_null]
-      - name: candidate_member_id
-        description: Best candidate member.
+        data_tests: [not_null]
+      - name: candidate_id
+        description: The candidate legacy member (member_link) or the other cardholder (pbm_duplicate).
+        data_tests: [not_null]
       - name: reason
-        description: Why the match needs review (see member_xref).
+        description: Why the case needs review (see member_xref and pbm_duplicate_pairs).
       - name: match_probability
-        description: Match probability of the best candidate.
+        description: Match probability of the pair.
       - name: second_probability
-        description: Match probability of the second-best candidate, if any.
+        description: For member_link, the match probability of the second-best candidate, if any.
       - name: pbm_first_name
-        description: First name in the PBM file (normalized).
-      - name: legacy_first_name
-        description: First name in the legacy member table (normalized).
+        description: First name of the cardholder (normalized).
+      - name: candidate_first_name
+        description: First name of the candidate (normalized).
       - name: pbm_last_name
-        description: Last name in the PBM file (normalized).
-      - name: legacy_last_name
-        description: Last name in the legacy member table (normalized).
+        description: Last name of the cardholder (normalized).
+      - name: candidate_last_name
+        description: Last name of the candidate (normalized).
       - name: pbm_birth_date
-        description: Birth date in the PBM file.
-      - name: legacy_birth_date
-        description: Birth date in the legacy member table.
+        description: Birth date of the cardholder.
+      - name: candidate_birth_date
+        description: Birth date of the candidate.
       - name: pbm_gender
-        description: Gender in the PBM file.
-      - name: legacy_gender
-        description: Gender in the legacy member table.
+        description: Gender of the cardholder.
+      - name: candidate_gender
+        description: Gender of the candidate.
       - name: pbm_zip_code
-        description: ZIP code in the PBM file.
-      - name: legacy_zip_code
-        description: ZIP code in the legacy member table.
+        description: ZIP code of the cardholder.
+      - name: candidate_zip_code
+        description: ZIP code of the candidate.
+
+  - name: identity_review_audit
+    description: >
+      Every reviewer decision with whether it still applies. A decision applies while the model
+      still proposes the case it decided; a stale decision has no effect (the test
+      assert_identity_review_decisions_apply warns about it).
+    columns:
+      - name: review_type
+        description: member_link or pbm_duplicate.
+      - name: cardholder_id
+        description: "{{ doc('cardholder_id') }}"
+      - name: candidate_id
+        description: The candidate legacy member or the other cardholder.
+      - name: decision
+        description: match or no_match.
+      - name: reviewer
+        description: Who decided.
+      - name: decided_at
+        description: Date of the decision.
+      - name: note
+        description: The reviewer's note, if any.
+      - name: current_match_probability
+        description: The model's match probability for the case now, if the model still proposes it.
+      - name: is_applied
+        description: True when the decision applies to a case the model proposes now.
+        data_tests: [not_null]
 
   - name: identity_match_quality
     description: >
       Identity resolution measured against the generator's ground truth, for the deterministic
-      baseline and Splink, overall and by injected variation.
+      baseline, Splink alone and Splink after the review decisions, overall and by injected
+      variation.
     columns:
       - name: method
-        description: deterministic or splink.
+        description: deterministic, splink (the model alone) or splink_reviewed (after the review decisions).
       - name: scope
-        description: all, an injected variation, or a kind of person the payer does not know.
+        description: all, an injected variation, or a kind of record other than a member's first cardholder ID.
       - name: cardholders
         description: Cardholders in scope.
       - name: legacy_members
@@ -172,7 +326,7 @@ models:
       - name: not_linked
         description: Legacy members left unlinked (false negative).
       - name: in_review
-        description: Sent to human review (Splink only).
+        description: Waiting for human review (Splink only).
       - name: precision
         description: linked_correct / (linked_correct + linked_wrong).
       - name: recall
@@ -181,3 +335,26 @@ models:
       - unique_combination:
           arguments:
             columns: ['method', 'scope']
+
+  - name: identity_dedupe_quality
+    description: >
+      Deduplication within the PBM measured against the ground truth: pairs of cardholder IDs of
+      the same person, merged or not, by the model alone and after the review decisions.
+    columns:
+      - name: method
+        description: splink or splink_reviewed.
+        data_tests: [unique, not_null]
+      - name: true_pairs
+        description: Pairs of cardholder IDs that are truly one person.
+      - name: merged_correct
+        description: True pairs merged.
+      - name: merged_wrong
+        description: Pairs merged that are two people (false positive).
+      - name: not_merged
+        description: True pairs left apart, in review or not scored as likely (false negative).
+      - name: in_review
+        description: Likely pairs waiting for review.
+      - name: precision
+        description: merged_correct / (merged_correct + merged_wrong).
+      - name: recall
+        description: merged_correct / true_pairs.

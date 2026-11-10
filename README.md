@@ -51,6 +51,11 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   (Splink compared with a deterministic baseline) and the scope (through FHIR). The replication
   slot monitoring that followed v2.0.0 was built the same way; Matheus chose where to measure and
   alert (history in the lakehouse plus a separate check) and to cap the WAL the slot can hold.
+  After v2.0.0, Matheus also chose how to check codes (tx.fhir.org in the CARIN validation, plus
+  the public CMS and FDA code lists checked in dbt against every resource, with CPT left
+  unverified because it is licensed) and how to finish identity resolution (reviewer decisions in
+  a versioned dbt seed applied over the model, with an audit trail and a simulated reviewer, and a
+  second Splink model that deduplicates the PBM's own cardholders).
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -98,8 +103,9 @@ make up        # build and start the legacy Postgres database
 make seed      # generate legacy data with deliberate quality issues
 make pbm       # generate the PBM feed: the same members under other IDs, with known variations
 make synthea   # generate synthetic FHIR R4 data (bulk NDJSON)
-make ingest    # CDC snapshot of the legacy tables + FHIR and PBM loads into the bronze layer
+make ingest    # CDC snapshot of the legacy tables + FHIR, PBM and code system loads into the bronze layer
 make dbt       # build silver/gold layers and run data tests
+make review    # optional: work the identity review queue as a simulated reviewer (rewrites the decisions seed)
 make coverage  # documentation and test coverage of the dbt models
 make docs      # browse models and the lineage graph
 ```
@@ -109,7 +115,7 @@ FHIR (Phases 4 and 6):
 ```bash
 make conformance          # run the official SQL on FHIR v2 test suite against the view compiler
 make views                # recompile fhir/view_definitions/*.json into dbt macros (after editing a view)
-make fhir-validate-carin  # validate a sample against the CARIN Blue Button 2.1.0 profiles (HL7 validator, Java)
+make fhir-validate-carin  # validate a sample against the CARIN Blue Button 2.1.0 profiles, codes checked by tx.fhir.org (HL7 validator, Java)
 make fhir-validate        # validate a sample against base FHIR R4 only
 ```
 
@@ -155,8 +161,9 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | Change data capture | 640 streamed changes, median latency 2.16 s with 5-second polling; rebuilt state matched the source row for row |
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
-| Identity resolution | PBM cardholders linked to members with 100% precision and 98.2% recall against ground truth (deterministic baseline: 99.5% and 93.8%); 69 uncertain matches sent to review |
-| FHIR validation     | 0 errors on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved (terminology not checked); 1,000 of 1,000 failed before remediation |
+| Identity resolution | PBM cardholders linked to members with 100% precision and 97.9% recall against ground truth (deterministic baseline: 99.5% and 93.4%), 98.9% after the review queue was worked; 93 of 94 duplicate cardholder IDs within the PBM merged, none wrongly |
+| FHIR validation     | 0 errors on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved, codes checked by tx.fhir.org; 1,000 of 1,000 failed before remediation |
+| Terminology         | Every ICD-10-CM, NDC and place of service code in the 29,224 exported claims valid on its service date (CMS and FDA releases); CPT, NUBC and NCPDP codes counted as unverified |
 
 ## Roadmap
 
@@ -168,14 +175,18 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Phase 6 – Profile conformance:** CARIN Blue Button 2.1.0 profiles (baseline, remediation, Organization resources, reference checks), validated in CI
 - [x] **Phase 7 – Identity resolution:** a PBM feed with the same members under other IDs, probabilistic matching (Splink) against a deterministic baseline, measured against ground truth, through to FHIR
 - [x] **Operations – Slot monitoring:** a WAL retention cap, an alert outside the loader, slot lag history in gold, recovery from a lost slot, and a drill in CI
+- [x] **Terminology:** codes checked by tx.fhir.org in the CARIN validation, and every code in every exported claim checked in dbt against the CMS ICD-10-CM and FDA NDC releases
+- [x] **Identity – Review and deduplication:** reviewer decisions as a versioned seed with an audit trail, a simulated reviewer, and duplicate cardholders within the PBM merged by a second Splink model
+- [ ] **FHIR API:** a HAPI FHIR server loaded from gold (search and Bulk `$export`), with prior authorization as PDex ExplanationOfBenefit
+- [ ] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
 
 ## Project structure
 
 ```
 legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
-scripts/       Synthea download and configuration, PBM feed generator, dbt coverage report
-ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM) with load logging
-dbt/           Silver and gold models (including the Splink Python model), seeds, tests, lineage
+scripts/       Synthea download and configuration, PBM feed generator, simulated identity reviewer, dbt coverage report
+ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
+dbt/           Silver and gold models (including the Splink Python models), seeds (with the review decisions), tests, lineage
 airflow/       Airflow image and DAGs
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base and CARIN)
 docs/          Technical write-up, migration checklist, architecture details and results

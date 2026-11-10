@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 
 import psycopg
 
-from claim_details import claim_details
+from claim_details import claim_details, diagnosis_on
 
 # Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
 PG_DSN = os.environ.get(
@@ -138,7 +138,7 @@ class Simulator:
             cur.execute(
                 "INSERT INTO clm_ln (clm_id, ln_nbr, proc_cd, dx_cd, units, chrg_amt, pd_amt, "
                 "ndc_cd, rev_cd, upd_ts) VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, %s)",
-                [clm_id, ln, None if claim_type == "R" else proc_cd, random.choice(DX_CODES),
+                [clm_id, ln, None if claim_type == "R" else proc_cd, diagnosis_on(random.choice(DX_CODES), svc),
                  random.randint(1, 3), chrg, details["ndc_cd"], details["rev_cd"], now],
             )
         return True

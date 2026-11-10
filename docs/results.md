@@ -27,7 +27,11 @@ only has its last digit replaced, so every figure on this page stayed the same.
 
 Phase 7 added the PBM feed and identity resolution. The PBM generator has its own random
 generator and reads the legacy members without changing them, so the earlier figures stayed the
-same; the FHIR totals grew by the PBM claims and pharmacies, reported separately below.
+same; the FHIR totals grew by the PBM claims and pharmacies, reported separately below. After
+v2.0.0, the PBM generator added duplicate cardholder IDs (from yet another random generator, so
+the rest of the feed did not change), which moved the identity figures, and the legacy generator
+replaced the ICD-10-CM code M54.5 with M54.50 on claims from October 2021 (see Terminology). The
+replacement draws no random number, so no other figure changed.
 
 ## Metrics
 
@@ -44,6 +48,8 @@ same; the FHIR totals grew by the PBM claims and pharmacies, reported separately
 | CARIN Blue Button profile conformance  | `make fhir-validate-carin`              | Phase 6     |
 | Identity resolution against ground truth | `gold.identity_match_quality`         | Phase 7     |
 | Replication slot lag and losses        | `gold.cdc_slot_lag`, `make slot-check`, `make slot-drill` | Operations |
+| Codes valid in their code systems      | `gold.terminology_code_check`, `make fhir-validate-carin` (tx.fhir.org) | After v2.0.0 |
+| Deduplication within the PBM, and review | `gold.identity_dedupe_quality`, `gold.identity_review_audit` | After v2.0.0 |
 
 ## Data quality
 
@@ -169,9 +175,11 @@ compiler does not implement.
 
 **Legacy data exported as FHIR:** 5,000 Patient, 5,000 Coverage, 24,507 ExplanationOfBenefit and
 301 Organization (the payer and 300 providers) resources. Since Phase 7, also 4,573
-ExplanationOfBenefit resources from PBM claims and 25 pharmacy Organizations (29,080
-ExplanationOfBenefit and 326 Organization resources in all), and 2,847 Patients carry the PBM
-cardholder ID as a second member identifier. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
+ExplanationOfBenefit resources from PBM claims and 25 pharmacy Organizations, and 2,847 Patients
+carry the PBM cardholder ID as a second member identifier. With the duplicate cardholder IDs and
+the review decisions (see Identity resolution), the PBM claims exported are 4,717 (29,224
+ExplanationOfBenefit and 326 Organization resources in all), and 2,872 Patients carry cardholder
+IDs. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
 unknown member and 251 outside the member's coverage, the counts in the data-quality table above.
 
 **View parity** (`gold.fhir_view_parity`):
@@ -183,15 +191,16 @@ unknown member and 251 outside the member's coverage, the counts in the data-qua
 | `legacy_coverage`    |     5,000 |          5,000 |            0 |                 0 |
 | `legacy_claims`      |    24,507 |         24,507 |            0 |                 0 |
 | `legacy_claim_lines` |    61,228 |         61,228 |            0 |                 0 |
-| `pbm_claims`         |     4,573 |          4,573 |            0 |                 0 |
-| `pbm_claim_lines`    |     4,573 |          4,573 |            0 |                 0 |
+| `pbm_claims`         |     4,717 |          4,717 |            0 |                 0 |
+| `pbm_claim_lines`    |     4,717 |          4,717 |            0 |                 0 |
 
 To check that the comparison can fail, it was run against deliberately altered references: swapping
 paid for charged amounts gave 24,507 mismatched rows, adding the claims outside coverage gave 251,
 and, in Phase 4 when invalid gender codes were still omitted, mapping them to `unknown` gave 51.
 
 **CARIN Blue Button conformance** (`make fhir-validate-carin`, HL7 validator 6.10.4, CARIN Blue
-Button STU 2.1.0, no terminology server). STU 2.1.0 is the version CMS lists for the Patient Access
+Button STU 2.1.0; codes checked by tx.fhir.org since the terminology work after v2.0.0, without a
+terminology server before). STU 2.1.0 is the version CMS lists for the Patient Access
 API; it lists 2.0.0 too, but as derived from standards that expired on January 1, 2026. Each
 ExplanationOfBenefit profile is sampled on its own, 200 resources per sample: the first 200 by
 `md5('42:' || id)`, so the same data always gives the same sample. Until Phase 6 the sample was a
@@ -218,23 +227,29 @@ found three more problems that only show when references are resolved: the Organ
 had no `meta.lastUpdated`, about 90% of the synthetic NPIs had an invalid check digit, and one pharmacy
 code was rejected (see the note on terminology below).
 
-After remediation:
+After remediation, with tx.fhir.org (run on 2026-11-10; two consecutive runs gave the same
+counts):
 
-| Sample                         | Validated | With errors | Warnings |
-|--------------------------------|----------:|------------:|---------:|
-| Patient                        |       200 |           0 |      200 |
-| Coverage                       |       200 |           0 |      800 |
-| Organization                   |       200 |           0 |      399 |
-| EOB Professional-NonClinician  |       200 |           0 |    2,642 |
-| EOB Inpatient-Institutional    |       200 |           0 |    2,602 |
-| EOB Outpatient-Institutional   |       200 |           0 |    2,566 |
-| EOB Pharmacy                   |       200 |           0 |    1,600 |
-| EOB Pharmacy, PBM claims (Phase 7) |   200 |           0 |    1,600 |
+| Sample                         | Validated | With errors | Warnings | Codes not verifiable |
+|--------------------------------|----------:|------------:|---------:|---------------------:|
+| Patient                        |       200 |           0 |      200 |                    0 |
+| Coverage                       |       200 |           0 |      800 |                    0 |
+| Organization                   |       200 |           0 |      399 |                    0 |
+| EOB Professional-NonClinician  |       200 |           0 |    1,600 |                    0 |
+| EOB Inpatient-Institutional    |       200 |           0 |    1,600 |                  501 |
+| EOB Outpatient-Institutional   |       200 |           0 |    1,600 |                  483 |
+| EOB Pharmacy                   |       200 |           0 |    2,102 |                  200 |
+| EOB Pharmacy, PBM claims (Phase 7) |   200 |           0 |    1,800 |                  200 |
 
 Warning counts include the resources in each Bundle. They are the `dom-6` narrative
 recommendation; identifier types defined by CARIN rather than the base value set; `Coverage.type`
-without a Payer Type code; and revenue and place of service codes whose code systems are not
-distributed, so they cannot be checked without a terminology server.
+without a Payer Type code; and, on the pharmacy samples, NDCs that tx.fhir.org reports as
+inactive (see Terminology below). Codes not verifiable are revenue codes (NUBC) and the NCPDP
+dispense as written code, whose code systems tx.fhir.org does not have: the validator says it
+cannot validate them, and they are counted apart and do not fail the run. tx.fhir.org reported no
+issue on the CPT, ICD-10-CM and place of service codes. Without a terminology server, as until
+v2.0.0, the professional and institutional samples had 2,642, 2,602 and 2,566 warnings, most of
+them place of service and revenue codes that could not be checked.
 
 Two checks sit outside the validator:
 
@@ -242,18 +257,50 @@ Two checks sit outside the validator:
   an error (a Bundle with the provider Organization removed passed). A dbt test
   (`assert_fhir_references_resolve`) checks that every reference in all exported resources
   resolves, and `validate.py` fails if a sampled resource references something not exported.
-- **Terminology.** Without a terminology server, the validator reports the NCPDP dispense as
-  written code as an error, because the code system is distributed only as a stub; with
-  tx.fhir.org the same code gets a warning. Those 400 errors per pharmacy sample (2 per Bundle) are counted
-  separately as `terminology_unverified` and do not fail the run. The run also clears the
-  validator's terminology cache (`-clear-tx-cache`), because it otherwise reuses codes cached by
-  earlier runs against a server, and the result would depend on the machine. A test run against
-  tx.fhir.org rejected the fictitious NDCs the generator first used, so it now uses 10 real NDCs of
-  common generic drugs, confirmed on tx.fhir.org.
+- **Terminology cache.** Without a terminology server (`make fhir-validate`), the validator
+  reports the NCPDP dispense as written code as an error, because the code system is distributed
+  only as a stub; those errors are counted as not verifiable too. Every run clears the validator's
+  terminology cache (`-clear-tx-cache`), because it otherwise reuses answers cached by earlier
+  runs, and the result would depend on the machine. A test run against tx.fhir.org in Phase 6
+  rejected the fictitious NDCs the generator first used, so it now uses 10 real NDCs of common
+  generic drugs.
 
 To check that the validation can fail, it was run on altered Bundles: removing the unique claim ID
 type from an EOB and removing `meta.lastUpdated` from the payer Organization each produced errors
 (the latter also on the EOB and Coverage that reference it).
+
+**Terminology** (`gold.terminology_code_check`, every code in every exported
+ExplanationOfBenefit, not a sample). `ingestion/load_terminology.py` loads the CMS ICD-10-CM
+releases for FY2021 to FY2026 (code descriptions in tabular order, pinned by URL and SHA-256) and
+the FDA NDC Directory into bronze; the CMS place of service codes are a seed. The model reads the
+codes through a ViewDefinition (`eob_codes`), so it checks what the API would serve, and checks
+each code on its service date: an ICD-10-CM code must be billable in the release for that fiscal
+year, and an NDC must be listed and marketed on that date.
+
+| Element               | Code system           | Codes | Occurrences | Result                          |
+|-----------------------|-----------------------|------:|------------:|---------------------------------|
+| Diagnosis             | ICD-10-CM             |    10 |      61,228 | valid (FY2024 to FY2026)        |
+| Product or service    | NDC                   |    10 |      10,704 | valid, listed by the FDA         |
+| Location              | CMS place of service  |     4 |      42,995 | valid                            |
+| Product or service    | CPT                   |    10 |      55,241 | unverified: licensed (AMA)       |
+| Revenue               | NUBC revenue codes    |     6 |      12,246 | unverified: licensed (NUBC)      |
+| Supporting info       | NCPDP DAW code        |     4 |       7,128 | unverified: only a stub published |
+
+None is invalid, and `assert_terminology_codes_valid` fails the build if one is. It did not start
+that way. The legacy generator drew the diagnosis M54.5 (low back pain), a billable code until
+FY2021 that became a category on October 1, 2021, split into M54.50, M54.51 and M54.59. Every
+claim dates from FY2024 or later, so M54.5 was invalid on all of them; the generator now writes
+M54.50 (unspecified) from that date, 6,079 diagnoses. To check that the model can fail, its
+compiled SQL was run with four extra codes on a 2025 claim: M54.5 came out invalid (a category),
+Z99.999 invalid (not in the release), NDC 00000000000 invalid (not in the directory) and place of
+service 98 invalid.
+
+The two checks disagree on one point. tx.fhir.org reports all 10 NDCs as inactive (a warning, 502
+on the pharmacy sample and 200 on the PBM one), while the FDA directory of 2026-11-10 lists every
+one of them with no marketing end date. The lakehouse follows the FDA, which publishes the code
+system. The FDA publishes only its current directory, so the NDC check cannot be pinned: the
+release date and SHA-256 of each load are recorded in `bronze.terminology_releases`, and a drug
+removed from the directory would make older claims fail.
 
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
 removed from the exported copies): 0 errors for Patient, Coverage and ExplanationOfBenefit. As a
@@ -289,8 +336,17 @@ varies each record independently at documented rates, then adds people the payer
 Of the 2,900 PBM records of members, 1,841 have no variation and 1,059 have at least one. The
 feed also holds 232 unrelated people, 29 look-alikes with a member's name, ZIP code and gender but
 a different birth date, and 14 "twins" with a member's last name, birth date and ZIP code but
-another first name: 3,175 cardholders and 5,141 pharmacy claims. A ground-truth file records the
-member behind each cardholder and the variations; only `gold.identity_match_quality` reads it.
+another first name. Finally, 3% of the members and unrelated people (94: 91 members, 3 unrelated)
+hold a second cardholder ID, as when a PBM reissues a card after re-enrollment. The duplicate
+record starts from the first one and is keyed again: a new ZIP code (40%), a nickname (10%), a
+first or last name typo or a missing gender (5% each); 39 moved, 10 have a nickname, 8 a first
+name typo, 2 a last name typo and 7 no gender. That makes 3,269 cardholders for 3,175 people, and
+5,275 pharmacy claims (134 of them on the duplicate IDs). The duplicates come from their own
+random generator, drawn after everything else, so they only add rows: every record and claim of
+the Phase 7 feed is still in it, unchanged. A ground-truth file
+records the member behind each cardholder, the variations and, for a duplicate, the first
+cardholder ID; only `gold.identity_match_quality`, `gold.identity_dedupe_quality` and the
+simulated reviewer read it.
 
 **Methods.** Both compare first names after replacing known nicknames with the formal name (seed
 `first_name_nicknames`, which covers the generator's nicknames, so its benefit here is an upper
@@ -304,66 +360,131 @@ bound).
   birth date, gender and ZIP code, trained without labels (u from 2 million random pairs with a
   fixed seed, m by expectation maximisation). `gold.member_xref` links a cardholder automatically
   when the best candidate's match probability is at least 0.95, the first names do not disagree
-  completely, no second candidate reaches 0.50 and no other cardholder claims the same member; a
+  completely, no second candidate reaches 0.50 and no other PBM person claims the same member; a
   best candidate from 0.50 goes to review (`gold.identity_review_queue`), anything lower is
   unmatched.
+- *Deduplication within the PBM* (`gold.identity_pbm_duplicates_splink`): the same comparisons,
+  with Splink's `dedupe_only` link type on the cardholders alone. `gold.pbm_duplicate_pairs` merges
+  a pair automatically from 0.95 when the first names do not disagree completely and the two
+  cardholders do not have strong candidates that are different legacy members (the payer's
+  records say they are two people); a pair from 0.50 that fails a condition goes to review.
+  `gold.pbm_persons` groups the merged pairs into persons, and cardholder IDs of one person may
+  link to the same member.
 
-Results (`gold.identity_match_quality`, 2,900 cardholders who are members):
+**Review.** The decisions of whoever works the queue live in a versioned dbt seed,
+`identity_review_decisions` (review type, cardholder, candidate, `match` or `no_match`, reviewer,
+date, note), and take precedence over the model: a `match` links the cardholder to the member the
+reviewer chose, which may be any candidate the model scored, not only the best. `member_xref` and
+`pbm_duplicate_pairs` keep the model's own decision (`model_status`) next to the final one and
+record who decided. `gold.identity_review_audit` lists every decision and whether it still applies:
+a decision applies while the model still proposes the case it decided, and a warning test
+(`assert_identity_review_decisions_apply`) flags the ones the data made stale. The project has no
+reviewers, so `scripts/review_identity_queue.py` (`make review`) stands in for them: it decides
+each case from the ground truth, appends the decisions to the seed and repeats with a rebuild until
+the queue is empty (a merged duplicate can change which member links compete; on this data one
+round decided all 136 cases). Once the duplicate pairs are merged, the model links the 20 cases
+queued because two PBM persons claimed the member on its own; their decisions still apply. A reviewer who reads
+the truth is always right, so the figures after review are an upper bound on what people would
+achieve. The seed holds 136 decisions:
 
-| Method        | Linked correctly | Linked to the wrong person | Not linked | In review | Precision | Recall  |
-|---------------|-----------------:|---------------------------:|-----------:|----------:|----------:|--------:|
-| Deterministic |            2,719 |                         14 |        181 |         — |    99.49% |  93.76% |
-| Splink        |            2,847 |                          0 |         53 |        69 |   100.00% |  98.17% |
+| Review type    | Queued because                               | Match | No match |
+|----------------|----------------------------------------------|------:|---------:|
+| Member link    | Best candidate below 0.95                     |     5 |       35 |
+| Member link    | First names disagree                          |    10 |        9 |
+| Member link    | A second candidate from 0.50                  |    15 |        — |
+| Member link    | Member claimed by another PBM person          |    20 |        — |
+| PBM duplicate  | Pair below 0.95                               |    13 |       18 |
+| PBM duplicate  | First names disagree                          |     — |        9 |
+| PBM duplicate  | Strong candidates are different members       |     — |        2 |
 
-Recall by variation (a record with two variations counts in both rows):
+Results (`gold.identity_match_quality`, 2,991 cardholders who are members, duplicates included):
 
-| Variation                  | Records | Deterministic | Splink |
-|----------------------------|--------:|--------------:|-------:|
-| Nickname                   |     210 |         93.3% |  94.3% |
-| First name typo            |     145 |         82.8% |  89.0% |
-| Last name typo             |     114 |         85.1% |  99.1% |
-| Different last name        |      63 |         79.4% |  84.1% |
-| Birth date transposed      |      20 |          0.0% |  90.0% |
-| Birth date mistyped        |      72 |          0.0% |  86.1% |
-| Birth date missing         |      29 |          0.0% |  89.7% |
-| Legacy birth date invalid  |      22 |          0.0% |  77.3% |
-| Moved (ZIP code)           |     436 |         89.0% |  93.1% |
-| Gender missing             |      87 |         91.9% |  95.4% |
+| Method              | Linked correctly | Linked to the wrong person | Not linked | In review | Precision | Recall  |
+|---------------------|-----------------:|---------------------------:|-----------:|----------:|----------:|--------:|
+| Deterministic       |            2,794 |                         14 |        197 |         — |    99.50% |  93.41% |
+| Splink              |            2,928 |                          0 |         63 |        74 |   100.00% |  97.89% |
+| Splink after review |            2,958 |                          0 |         33 |          0 |   100.00% |  98.90% |
+
+Before the duplicates were added, Splink linked 2,847 of the 2,900 members correctly; retrained on
+the feed with the duplicates, it links 2,845 of those 2,900, plus 83 of the 91 duplicate IDs of
+members. Of the 74 cases in review, 30 are members, each with the right member as the best candidate,
+and 44 are people the payer does not know (the 14 twins, the 29 look-alikes and 1 unrelated
+person); the simulated reviewer linked the 30 and rejected the 44. The 33 members still not linked
+all have a best candidate below 0.50, so they never reach review: for 23 the best candidate is the
+right member, for 5 another one, and 5 have no candidate at all. No unrelated person was linked.
+
+Recall by variation (a record with two variations counts in both rows; duplicate records count
+under their own variations and under "Second cardholder ID"):
+
+| Variation                  | Records | Deterministic | Splink | Splink after review |
+|----------------------------|--------:|--------------:|-------:|--------------------:|
+| Nickname                   |     220 |         92.3% |  93.6% |               96.8% |
+| First name typo            |     153 |         79.7% |  86.9% |               97.4% |
+| Last name typo             |     115 |         85.2% |  99.1% |               99.1% |
+| Different last name        |      63 |         79.4% |  84.1% |               85.7% |
+| Birth date transposed      |      20 |          0.0% |  90.0% |               90.0% |
+| Birth date mistyped        |      72 |          0.0% |  86.1% |               88.9% |
+| Birth date missing         |      29 |          0.0% |  89.7% |               89.7% |
+| Legacy birth date invalid  |      22 |          0.0% |  77.3% |               77.3% |
+| Legacy gender invalid      |      28 |         96.4% |  96.4% |              100.0% |
+| Moved (ZIP code)           |     473 |         87.3% |  92.2% |               93.5% |
+| Gender missing             |      94 |         91.5% |  95.7% |               96.8% |
+| Second cardholder ID       |      91 |         82.4% |  91.2% |               94.5% |
 
 The 14 deterministic false positives are the 14 twins: the rule on last name, birth date and ZIP
 code links them. Splink scores 9 of the twins above 0.99 (the other 5 below 0.95): nicknames and
-typos teach it that differing first names are not rare among true matches. At the same threshold
+typos teach it that differing first names are not rare among true matches (the same 9 and 5 after
+the duplicates were added). At the same threshold
 and without the first-name guard, a first model without the nickname level linked 2,838 correctly
 and 9 wrongly (those twins); the nickname level raised the correct links to 2,869 but left the 9;
-the guard sends them to review, at the cost of 10 true matches whose first names also disagree. The review queue holds 69 cardholders: 25
-members, each with the right member as the best candidate, and 44 people the payer does not know
-(the 14 twins, the 29 look-alikes and 1 unrelated person). No unrelated person was linked.
+the guard sends them to review, at the cost of 10 true matches whose first names also disagree
+(Phase 7 figures, before the duplicates).
 
-**Effect on the FHIR data.** Of the 5,141 PBM claims, 4,573 are exported as ExplanationOfBenefit
-resources (Pharmacy profile) for linked members with coverage on the fill date; 39 claims of
-linked members fall outside their coverage, and 529 belong to cardholders in review or unmatched.
-They stay in `gold.fct_pbm_claims`, flagged. `assert_identity_match_quality` fails the build if the
-automatic links include a wrong person or find fewer than 95% of the members; applied to the
-deterministic baseline, it fails.
+**Deduplication** (`gold.identity_dedupe_quality`, 94 pairs of cardholder IDs of the same person):
 
-The Splink model runs on one thread: with several, parallel sums added up in varying order and
+| Method              | Merged correctly | Merged wrongly | Not merged | In review | Precision | Recall  |
+|---------------------|-----------------:|---------------:|-----------:|----------:|----------:|--------:|
+| Splink              |               80 |              0 |         14 |        42 |   100.00% |  85.11% |
+| Splink after review |               93 |              0 |          1 |          0 |   100.00% |  98.94% |
+
+The model scored 122 pairs from 0.50: it merged 80 and sent 42 to review, of which 13 were the
+same person and 29 were not (18 below 0.95, 9 whose first names disagree completely and 2 whose
+strong legacy candidates are different members). The 3,269 cardholders resolve to 3,176 persons:
+one true pair has no score from 0.50, never reaches review and stays apart.
+
+**Effect on the FHIR data.** Of the 5,275 PBM claims, 4,717 are exported as ExplanationOfBenefit
+resources (Pharmacy profile) for linked members with coverage on the fill date; 43 claims of
+linked members fall outside their coverage, and 515 belong to cardholders that are not linked.
+They stay in `gold.fct_pbm_claims`, flagged. 2,872 Patients carry PBM cardholder IDs as member
+identifiers, 86 of them two (one person, two cards).
+
+**Gates.** `assert_identity_match_quality` fails the build if the model's automatic links include
+a wrong person or find fewer than 95% of the members, or if a link is wrong after review; applied to
+the deterministic baseline, it fails. To check that the review part can fail, one `no_match`
+decision on a look-alike was changed to `match`: the test failed with one row, and passed again
+once the seed was restored. `assert_identity_dedupe_quality` fails if a merge joins two different
+people, and `assert_member_linked_to_one_person` if a member is linked to more than one PBM person.
+
+Both Splink models run on one thread: with several, parallel sums added up in varying order and
 the scores differed in the 15th digit from run to run (no decision changed). On one thread, three
-consecutive builds gave identical scores.
+consecutive builds gave identical scores (measured in Phase 7, on the linkage model).
 
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
-columns that exist in the database), after Phase 7.
+columns that exist in the database), after the terminology and identity work that followed
+v2.0.0.
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
-| Silver |     12 |              100% |              100% |     108 |               100% |              37.0% |
-| Gold   |     28 |              100% |              100% |     231 |               100% |              20.3% |
+| Silver |     14 |              100% |              100% |     119 |               100% |              37.0% |
+| Gold   |     35 |              100% |              100% |     297 |               100% |              22.9% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
-checks, not descriptive attributes such as names or amounts. `dbt build` ran 184 nodes: 179
-passed, 5 ended with the expected warnings for the legacy issues above, and none failed.
+checks, not descriptive attributes such as names or amounts. `dbt build` ran 247 nodes: 241
+passed, 6 ended with the expected warnings (5 for the legacy issues above, 1 for the replication
+slot the drill drops on purpose), and none failed.
 In Phase 4, `lakehouse_full_refresh` ran the same steps in Airflow with the same result; it was not
 rerun after Phases 6 and 7.
 
@@ -384,8 +505,16 @@ The data generators and the gold models are pinned, so the results do not depend
 - **PBM feed.** `scripts/generate_pbm_feed.py` reads the legacy members in a fixed order and uses
   its own random generator (seed 42 + 2) and the same reference date, so repeated runs write
   byte-identical files.
-- **Identity resolution.** The Splink model samples its u probabilities with a fixed seed and runs
-  on one thread, so its scores are identical from build to build.
+- **Identity resolution.** The Splink models sample their u probabilities with a fixed seed and
+  run on one thread, so their scores are identical from build to build. The review decisions are
+  a versioned seed; `make review` dates them on the reference date, so the same data writes the
+  same seed (started from an empty seed, it wrote the committed one byte for byte), and with the
+  committed seed it finds an empty queue.
+- **Code systems.** The ICD-10-CM releases are pinned by URL and SHA-256. The FDA publishes only
+  the current NDC Directory, so the NDC check uses the directory of the day it was downloaded
+  (cached in `data/terminology/`; CI downloads it again each week); its date and SHA-256 are in
+  `bronze.terminology_releases`. tx.fhir.org, used by `make fhir-validate-carin`, is also a live
+  service whose content can change.
 - **Gold models.** Wherever a model needs "today" (`fct_member_months`, and the
   `is_currently_covered` flag in `dim_member`), it uses the dbt variable `as_of_date` (default
   2026-09-28, the legacy generator's reference date) instead of `current_date`. Pass

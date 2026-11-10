@@ -3,10 +3,14 @@
 Takes a reproducible sample of the gold FHIR models and runs the HL7 FHIR
 validator on it. The sample is the first N resources ordered by md5 of a seed
 and the resource ID, so it does not depend on the physical row order, which
-changes each time dbt rebuilds a table (a reservoir sample did). Terminology is not checked (-tx n/a): the
-validator checks structure, cardinality, data types, invariants and value sets
-it can expand locally, but not whether codes such as CPT, ICD-10-CM or NDC exist
-in their code systems.
+changes each time dbt rebuilds a table (a reservoir sample did). By default,
+terminology is not checked (-tx n/a): the validator checks structure,
+cardinality, data types, invariants and value sets it can expand locally, but
+not whether codes such as CPT, ICD-10-CM or NDC exist in their code systems.
+With --tx <url> (make fhir-validate-carin uses https://tx.fhir.org), a
+terminology server checks the codes too. Codes of code systems the server does
+not have (NUBC revenue codes, the NCPDP stub) are counted as unverified. The
+lakehouse checks every code, not a sample, in gold.terminology_code_check.
 
 Two modes:
 
@@ -26,6 +30,7 @@ Usage (from the repository root, Java 17+ required):
     python fhir/validate.py                 # base FHIR R4
     python fhir/validate.py --sample 50
     python fhir/validate.py --ig carin-bb   # CARIN Blue Button 2.1.0
+    python fhir/validate.py --ig carin-bb --tx https://tx.fhir.org   # with terminology
 
 Exits with status 1 if any sample has an error, if a sample is empty, or (with
 --ig) if a sampled resource references a resource that is not exported.
@@ -82,12 +87,14 @@ CARIN_SAMPLES = {
 BUNDLE_BASE = "https://payer-data-readiness.example/fhir/"
 SAMPLE_SEED = 42
 # Code systems whose content is not distributed (the terminology package has
-# only a stub). Without a terminology server (-tx n/a) the validator reports
-# their codes as errors although nothing is wrong with them; with tx.fhir.org
-# the same codes get a warning ("could not be found, so the code cannot be
-# validated"). These errors are counted as terminology_unverified instead.
+# only a stub, and tx.fhir.org does not have it either: NUBC is licensed).
+# Without a terminology server (-tx n/a) the validator reports their codes as
+# errors although nothing is wrong with them; with tx.fhir.org the same codes
+# get a warning ("could not be found, so the code cannot be validated"). Both
+# are counted as terminology_unverified instead.
 UNDISTRIBUTED_CODE_SYSTEMS = {
     "http://terminology.hl7.org/CodeSystem/NCPDPDispensedAsWrittenOrProductSelectionCode",
+    "https://www.nubc.org/CodeSystem/RevenueCodes",
 }
 
 
@@ -171,12 +178,13 @@ def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict
     return counts, unresolved
 
 
-def run_validator(extra_args: list[str] = ()) -> dict:
-    # -clear-tx-cache: without a terminology server the validator still reuses codes
-    # cached by earlier runs that had one, so results would depend on the machine.
+def run_validator(extra_args: list[str] = (), tx: str = "n/a") -> dict:
+    # -clear-tx-cache: the validator caches terminology answers between runs, so
+    # without it an offline run would reuse codes checked by an earlier online one,
+    # and an online run answers from what the server said last time.
     output = OUT_DIR / "results.json"
     cmd = ["java", "-jar", str(VALIDATOR_JAR), str(OUT_DIR / "input"),
-           "-version", "4.0.1", "-tx", "n/a", "-clear-tx-cache", *extra_args, "-output", str(output)]
+           "-version", "4.0.1", "-tx", tx, "-clear-tx-cache", *extra_args, "-output", str(output)]
     print("Running:", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
     (OUT_DIR / "validator.log").write_text(proc.stdout + proc.stderr)
@@ -185,7 +193,8 @@ def run_validator(extra_args: list[str] = ()) -> dict:
     return json.loads(output.read_text())
 
 
-def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = None, top: int = 15) -> dict:
+def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = None, top: int = 15,
+              tx: str = "n/a") -> dict:
     # One OperationOutcome per file (a Bundle when several files were validated).
     outcomes = [e["resource"] for e in results.get("entry", [])] if results.get("resourceType") == "Bundle" else [results]
     per_type = {t: Counter() for t in counts}
@@ -198,8 +207,8 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
         for issue in oo.get("issue", []):
             severity = issue.get("severity")
             text = issue.get("details", {}).get("text") or issue.get("diagnostics", "")
-            if severity == "error" and any(f"CodeSystem '{cs}'" in text and "could not be found" in text
-                                           for cs in UNDISTRIBUTED_CODE_SYSTEMS):
+            if severity in ("error", "warning") and any(f"CodeSystem '{cs}'" in text and "could not be found" in text
+                                                         for cs in UNDISTRIBUTED_CODE_SYSTEMS):
                 per_type.setdefault(rtype, Counter())["terminology_unverified"] += 1
                 continue
             if severity in ("fatal", "error"):
@@ -214,7 +223,8 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
         "validator": VALIDATOR_VERSION,
         "fhir_version": "4.0.1",
         "implementation_guide": ig,
-        "terminology_checked": False,
+        "terminology_checked": tx != "n/a",
+        "terminology_server": None if tx == "n/a" else tx,
         "by_resource": {t: {"validated": counts.get(t, 0),
                             "resources_with_errors": per_type[t]["resources_with_errors"],
                             "errors": per_type[t]["error"],
@@ -235,6 +245,7 @@ def main() -> None:
     ap.add_argument("--sample", type=int, default=200, help="resources per sample")
     ap.add_argument("--ig", choices=["carin-bb"], help=f"validate against an IG ({CARIN_PACKAGE})")
     ap.add_argument("--top", type=int, default=15, help="most frequent messages to report")
+    ap.add_argument("--tx", default="n/a", help="terminology server (default n/a: codes not checked)")
     args = ap.parse_args()
     global OUT_DIR
     if args.ig:
@@ -242,7 +253,8 @@ def main() -> None:
     download_validator()
     counts, unresolved = export_sample(args.sample, CARIN_SAMPLES if args.ig else BASE_SAMPLES, bundles=bool(args.ig))
     extra = ["-ig", CARIN_PACKAGE] if args.ig else []
-    summary = summarize(run_validator(extra), counts, unresolved, CARIN_PACKAGE if args.ig else None, args.top)
+    summary = summarize(run_validator(extra, args.tx), counts, unresolved, CARIN_PACKAGE if args.ig else None,
+                        args.top, args.tx)
 
     width = max(map(len, summary["by_resource"])) + 1
     print(f"\n{'Resource':{width}} {'Validated':>9} {'With errors':>11} {'Errors':>7} {'Warnings':>8} {'Tx unverified':>13}")

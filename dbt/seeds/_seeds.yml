@@ -13,3 +13,66 @@ seeds:
       - name: first_name
         description: Formal first name, lower case.
         data_tests: [not_null]
+
+  - name: place_of_service_codes
+    description: >
+      CMS place of service code set (version 2024-05-02, the CodeSystem content tx.fhir.org
+      serves), used to check the place of service on professional claims.
+    config:
+      column_types: {code: varchar, name: varchar}
+    columns:
+      - name: code
+        description: Two-digit place of service code.
+        data_tests: [unique, not_null]
+      - name: name
+        description: Place of service name.
+
+  - name: identity_review_decisions
+    description: >
+      Decisions of the people who work the identity review queue (gold.identity_review_queue),
+      one row per decided case. It is the audit trail of the review: who decided what and when,
+      under version control. gold.member_xref and gold.pbm_duplicate_pairs apply the decisions
+      over the model; gold.identity_review_audit shows which still apply. In this project the
+      reviewer is simulated from the ground truth (`make review`).
+    config:
+      column_types:
+        review_type: varchar
+        cardholder_id: varchar
+        candidate_id: varchar
+        decision: varchar
+        reviewer: varchar
+        decided_at: date
+        note: varchar
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [review_type, cardholder_id, candidate_id]
+    columns:
+      - name: review_type
+        description: member_link (a cardholder and a legacy member) or pbm_duplicate (two cardholders).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [member_link, pbm_duplicate]
+      - name: cardholder_id
+        description: The PBM cardholder of the case (for pbm_duplicate, the lower of the two IDs).
+        data_tests: [not_null]
+      - name: candidate_id
+        description: The legacy member ID (member_link) or the other cardholder ID (pbm_duplicate).
+        data_tests: [not_null]
+      - name: decision
+        description: match (the same person) or no_match.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [match, no_match]
+      - name: reviewer
+        description: Who decided.
+        data_tests: [not_null]
+      - name: decided_at
+        description: Date of the decision.
+        data_tests: [not_null]
+      - name: note
+        description: The reviewer's note, if any.

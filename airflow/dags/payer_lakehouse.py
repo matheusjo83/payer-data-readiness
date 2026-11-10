@@ -1,7 +1,8 @@
 """Orchestration of the payer lakehouse pipeline.
 
 legacy_cdc_refresh      every 30 minutes: apply legacy changes (CDC), rebuild silver/gold
-lakehouse_full_refresh  on demand: CDC, FHIR and PBM loads, ViewDefinition check, rebuild, coverage report
+lakehouse_full_refresh  on demand: CDC, FHIR, PBM and terminology loads, ViewDefinition check, rebuild,
+                        coverage report
 cdc_slot_monitor        every 5 minutes: check replication slot lag (fails = alert)
 
 Every task that writes the DuckDB lakehouse runs in the `lakehouse` pool (1 slot),
@@ -52,7 +53,7 @@ with DAG(
 
 with DAG(
     dag_id="lakehouse_full_refresh",
-    description="CDC sync, FHIR and PBM loads, ViewDefinition check, dbt build and coverage report",
+    description="CDC sync, FHIR, PBM and terminology loads, ViewDefinition check, dbt build and coverage report",
     schedule=None,
     start_date=datetime(2026, 1, 1),
     catchup=False,
@@ -62,6 +63,10 @@ with DAG(
 ):
     load_fhir = BashOperator(task_id="load_fhir", bash_command=f"{PY} ingestion/load_fhir.py", cwd=PROJECT)
     load_pbm = BashOperator(task_id="load_pbm", bash_command=f"{PY} ingestion/load_pbm.py", cwd=PROJECT)
+    # Code system releases (ICD-10-CM, NDC), cached in data/terminology/ after the first download.
+    load_terminology = BashOperator(
+        task_id="load_terminology", bash_command=f"{PY} ingestion/load_terminology.py", cwd=PROJECT
+    )
     # Fails when a ViewDefinition changed but its dbt macro was not regenerated (make views).
     views_check = BashOperator(
         task_id="views_check", bash_command=f"{PY} fhir/build_views.py --check", cwd=PROJECT, pool="default_pool"
@@ -71,7 +76,7 @@ with DAG(
         bash_command=f"cd dbt && {DBT} docs generate --profiles-dir . && cd .. && {PY} scripts/dbt_coverage.py",
         cwd=PROJECT,
     )
-    cdc_sync() >> load_fhir >> load_pbm >> views_check >> dbt_build() >> coverage
+    cdc_sync() >> load_fhir >> load_pbm >> load_terminology >> views_check >> dbt_build() >> coverage
 
 
 with DAG(
