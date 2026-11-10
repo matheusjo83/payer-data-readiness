@@ -66,7 +66,7 @@ def run_view(con, view, resources):
     sql = compile_view(view, "resources", typed=False)
     cur = con.execute(sql)
     names = [d[0] for d in cur.description]
-    return [{n: (json.loads(v) if v is not None else None) for n, v in zip(names, row)}
+    return [{n: (json.loads(v) if v is not None else None) for n, v in zip(names, row, strict=True)}
             for row in cur.fetchall()]
 
 

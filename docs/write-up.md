@@ -216,14 +216,15 @@ claims, member months and prior authorization timeliness, and the quality and re
 Tests fall into two groups on purpose. Tests on keys, relationships and allowed values that should
 always hold are errors, and they fail the build. Tests that flag issues known to exist in the
 legacy source are warnings: they count those issues without stopping the pipeline, and
-`gold.dq_issue_summary` reports the counts. The final build ran 136 nodes: 131 passed and 5 ended
-in the expected warnings.
+`gold.dq_issue_summary` reports the counts. At the end of Phase 3 the build ran 136 nodes: 131
+passed and 5 ended in the expected warnings. It now runs 247: 241 pass, and 6 end in expected
+warnings (the same five, plus the replication slot the drill drops on purpose).
 
 For coverage, a small script written by Claude Code combines the dbt manifest (descriptions and tests) with
 the catalog (the columns that actually exist in the database). A column that exists but is missing
 from the documentation counts against coverage. Every model and column is documented, and every
 model has at least one test. Column-level test coverage was 38.0% in silver and 23.5% in gold when
-this was first written, in Phase 3; after the work that followed v2.0.0 it is 37.0% and 22.9%. I
+this was first written, in Phase 3; after the work that followed v2.0.0 it is 37.0% and 22.8%. I
 publish those numbers as they are. The tests cover keys, relationships, allowed values, parity and
 the quality checks, and adding tests to descriptive columns only to raise the percentage would make
 the metric less honest, not the data more reliable.
@@ -412,7 +413,8 @@ the disagreement cost little. The exact rules did the same: all 14 of their fals
 the twins. Two changes followed. A nickname level in the first-name comparison, through a small
 dictionary, which raised the correct links. And a guard: no automatic link when the first names
 disagree completely; the case goes to a review queue with both records side by side. The guard
-costs ten true matches that now wait for review, and it removed every wrong link.
+costs ten true matches that now wait for review, and it removed every wrong link. In Phase 7,
+before the PBM had duplicate cardholder IDs (current figures in the next sections):
 
 | Method        | Linked correctly | Linked wrongly | Not linked | In review | Precision | Recall  |
 |---------------|-----------------:|---------------:|-----------:|----------:|----------:|--------:|
@@ -424,9 +426,10 @@ members whose birth date is transposed, mistyped, missing or invalid in the lega
 every rule requires the birth date; Splink finds 77% to 90% of them. A test now fails the build if
 an automatic link is wrong or recall falls below 95%, and it fails when pointed at the baseline.
 
-The PBM claims then follow the members: 4,573 of 5,141 become ExplanationOfBenefit resources.
-The other 568 wait, flagged, because their cardholder is in review or unmatched (529) or the member
-had no coverage on the fill date (39).
+The PBM claims then follow the members: in Phase 7, 4,573 of 5,141 became ExplanationOfBenefit
+resources (4,717 of 5,275 now, with the duplicates and the review). The other 568 waited,
+flagged, because their cardholder was in review or unmatched (529) or the member had no coverage
+on the fill date (39).
 
 One more reproducibility detail surfaced here. Splink's scores differed in the 15th digit from run
 to run, because DuckDB adds up parallel sums in varying order. No decision changed, but the
@@ -570,7 +573,7 @@ one line from the Java runtime inside the pinned Synthea release.
    rebuilt state against the source, not in unit-level checks.
 3. **Make tests prove they can fail.** A parity check or a validator that always passes is only
    evidence once you have seen it catch a deliberate error.
-4. **Publish the uncomfortable numbers.** Column test coverage of 22.9% in gold, eight unimplemented
+4. **Publish the uncomfortable numbers.** Column test coverage of 22.8% in gold, eight unimplemented
    experimental tests and a 14-second view are part of the result. Hiding them would make every
    other number less credible.
 5. **Treat the data layer as the product.** An interoperability API can only be as reliable as the

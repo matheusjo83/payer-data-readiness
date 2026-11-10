@@ -137,7 +137,7 @@ def main() -> None:
                             [(*r, run_id) for r in releases])
         with logged_load(con, run_id, "terminology.icd10cm", "bronze.terminology_icd10cm"):
             icd = pa.Table.from_arrays(
-                [pa.array(col) for col in zip(*icd_rows)],
+                [pa.array(col) for col in zip(*icd_rows, strict=True)],
                 names=["fiscal_year", "order_number", "code", "is_billable",
                        "short_description", "long_description"])
             con.register("icd_arrow", icd)

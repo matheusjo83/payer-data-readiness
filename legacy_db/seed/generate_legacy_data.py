@@ -196,7 +196,7 @@ def main() -> None:
         claims.append((cid, mid, prv_id, claim_type, ymd(svc), ymd(svc_to),
                        ymd(rcvd), adj, status, round(tot_chrg, 2), round(tot_pd, 2),
                        *(header[c] for c in CLAIM_DETAIL_COLS), now))
-        for line, details in zip(claim_lines, line_details):
+        for line, details in zip(claim_lines, line_details, strict=True):
             if claim_type == "R":
                 line[2] = None   # pharmacy lines carry an NDC instead of a procedure code
             lines.append((*line, *(details[c] for c in LINE_DETAIL_COLS), now))
