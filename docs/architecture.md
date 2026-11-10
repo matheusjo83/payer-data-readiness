@@ -53,31 +53,52 @@ replication slot (wal2json). It does not change the legacy tables and it capture
 - **Current state.** Silver models rebuild each table's current state with the
   `legacy_current_state` macro: the latest version of each primary key after the last TRUNCATE,
   without deleted keys. Rows that share an `_lsn` are ordered by `_seq`.
-- **Operational note.** A replication slot makes Postgres keep WAL until it is consumed. If the
-  loader is stopped for a long time, run `python ingestion/cdc_legacy.py drop-slot`; the next
+- **Slot monitoring.** A replication slot makes Postgres keep WAL until it is consumed, so a
+  stopped loader makes the database log grow. Three pieces handle that:
+  - *A cap.* The legacy database sets `max_slot_wal_keep_size = 1GB` (`docker-compose.yml`). Past
+    it, Postgres invalidates the slot (`wal_status = lost`) instead of filling the disk.
+  - *An alert that does not depend on the loader.* `make slot-check`
+    (`cdc_legacy.py slot-status`) reads `pg_replication_slots` and fails when the slot holds more
+    than 512 MB of WAL (half the cap), when it is beyond the cap (`unreserved`), when it was lost,
+    or when it does not exist. It reads only Postgres, so it works when the loader or the lakehouse
+    is stuck, which is when the lag grows; the `cdc_slot_monitor` DAG runs it every 5 minutes.
+  - *History and recovery.* Before each sync the loader records the slot state in
+    `bronze._cdc_slot_status`, and `gold.cdc_slot_lag` summarizes it (WAL retained and pending, the
+    longest gap between syncs, slot losses). When the loader finds the slot lost, it records the
+    loss and takes a new snapshot, since the WAL it had not read is gone. The new snapshot replaces
+    the change tables, so the CDC latency history starts over. A dbt test warns when a loss is in
+    the history.
+
+  `make slot-drill` proves the chain: with the loader stopped, it writes WAL until the slot is
+  lost and checks the alert, the loss and the recovery. CI runs it on every pull request. To
+  release the slot by hand, run `python ingestion/cdc_legacy.py drop-slot`; the next
   `make ingest` takes a new snapshot.
 
 ## Orchestration
 
-`airflow/dags/payer_lakehouse.py` defines two DAGs, run by Airflow 3 in Docker
+`airflow/dags/payer_lakehouse.py` defines three DAGs, run by Airflow 3 in Docker
 (`make airflow-up`, UI at http://localhost:8080, no login in this local setup):
 
 | DAG                      | Schedule          | Tasks                                                   |
 |--------------------------|-------------------|---------------------------------------------------------|
 | `legacy_cdc_refresh`     | every 30 minutes  | `cdc_sync` → `dbt_build`                                |
-| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `views_check` → `dbt_build` → `dbt_coverage` |
+| `lakehouse_full_refresh` | manual            | `cdc_sync` → `load_fhir` → `load_pbm` → `views_check` → `dbt_build` → `dbt_coverage` |
+| `cdc_slot_monitor`       | every 5 minutes   | `slot_check` (fails when the replication slot needs attention) |
 
-Both DAGs start paused. Design choices:
+All DAGs start paused. Design choices:
 
 - **Airflow only orchestrates.** Tasks call the same scripts and `dbt build` used by `make`,
   through `BashOperator`. The loaders and dbt run in their own virtualenv inside the image, so
   their dependencies never conflict with Airflow's. Versions are pinned in `requirements.txt`,
   because the host and the container write the same DuckDB file.
-- **One writer at a time.** Every task runs in the `lakehouse` pool, which has one slot: tasks
-  from both DAGs wait for each other instead of failing on a locked DuckDB file. Do not run the
+- **One writer at a time.** Every task that writes the lakehouse runs in the `lakehouse` pool,
+  which has one slot: tasks from both refresh DAGs wait for each other instead of failing on a
+  locked DuckDB file. `slot_check` reads only Postgres and runs outside the pool, so a stuck
+  writer cannot delay the alert. Do not run the
   `make` targets that write to the lakehouse while Airflow is running tasks.
-- **Failure policy.** Each task retries twice. Data tests configured as warnings (known legacy
-  issues) do not fail `dbt_build`; test errors do.
+- **Failure policy.** Each task retries twice, except `slot_check`, whose failed run is the
+  alert and should show at once. Data tests configured as warnings (known legacy issues) do not
+  fail `dbt_build`; test errors do.
 - **Local setup.** `airflow standalone` with the LocalExecutor and a separate Postgres for Airflow
   metadata. A production deployment would run the scheduler, API server and workers as separate
   services with real authentication.

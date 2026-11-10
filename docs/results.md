@@ -43,6 +43,7 @@ same; the FHIR totals grew by the PBM claims and pharmacies, reported separately
 | FHIR validity of legacy-derived data   | `make fhir-validate`                    | Phase 4     |
 | CARIN Blue Button profile conformance  | `make fhir-validate-carin`              | Phase 6     |
 | Identity resolution against ground truth | `gold.identity_match_quality`         | Phase 7     |
+| Replication slot lag and losses        | `gold.cdc_slot_lag`, `make slot-check`, `make slot-drill` | Operations |
 
 ## Data quality
 
@@ -129,6 +130,30 @@ tables matched the Postgres tables row for row in all seven tables.
 
 Both processes ran on the same machine, so the source and lakehouse clocks agree; with separate
 hosts, clock skew would add to the measured latency.
+
+## Replication slot monitoring
+
+Run on 2026-11-10 with `make slot-drill` (written to `data/slot_drill.json`), after `make ingest`.
+With the loader stopped, the drill writes WAL one 16 MB segment at a time until Postgres
+invalidates the slot, and checks each stage with `make slot-check`:
+
+| Stage                         | Segments written | WAL retained | WAL pending | `wal_status` | `slot-check` |
+|-------------------------------|-----------------:|-------------:|------------:|--------------|--------------|
+| Healthy slot                  |                0 |       0.0 MB |      0.0 MB | reserved     | passes       |
+| Above the 512 MB threshold    |               33 |     514.7 MB |    514.7 MB | reserved     | fails        |
+| Past the 1 GB cap, checkpoint |               72 |          n/a |  1,138.7 MB | lost         | fails        |
+| After the next sync           |                — |       0.0 MB |      0.0 MB | reserved     | passes       |
+
+The alert fired at about half the cap, while the slot was still usable: Postgres reported
+512 MB left before the slot would be at risk (`safe_wal_size`). The next `sync` found the slot
+lost, recorded it in `bronze._cdc_slot_status` and took a new snapshot (101,194 rows, the same
+legacy data). `gold.cdc_slot_lag` then showed one loss, and its warning test fired as intended.
+The whole drill took about 4 seconds, because `pg_switch_wal` moves to a new segment without
+writing it full.
+
+Writing WAL this way is a stand-in for a stalled loader; it does not measure how fast real
+traffic would fill the slot. The thresholds (512 MB alert, 1 GB cap) are sized for this local
+setup.
 
 ## FHIR (Phases 4 and 6)
 

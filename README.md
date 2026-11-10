@@ -48,7 +48,9 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   Code under Matheus's supervision, including changes to the legacy generator Matheus wrote in
   Phase 1. In Phase 6, Matheus chose how to handle the fields the legacy source lacked, the invalid
   gender codes and the references; in Phase 7, the second source (a PBM feed), the matching method
-  (Splink compared with a deterministic baseline) and the scope (through FHIR).
+  (Splink compared with a deterministic baseline) and the scope (through FHIR). The replication
+  slot monitoring that followed v2.0.0 was built the same way; Matheus chose where to measure and
+  alert (history in the lakehouse plus a separate check) and to cap the WAL the slot can hold.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -65,7 +67,7 @@ Synthea (synthetic FHIR R4) ──── NDJSON load ──┐
 Legacy payer DB (Postgres) ──── CDC (WAL) ─────┤   (raw)    (tested)  (models)  Quality & lineage
                                 (logged)       │                      Identity resolution
 PBM files (pipe-delimited) ──── file load ─────┘
-          └──── orchestrated by Airflow (CDC sync, FHIR and PBM loads, dbt build, coverage) ────┘
+          └─── orchestrated by Airflow (CDC sync, slot monitor, FHIR and PBM loads, dbt, coverage) ───┘
 ```
 
 | Layer  | Location (DuckDB)         | Contents                                                 |
@@ -123,13 +125,19 @@ make changes   # terminal 2: 300 inserts/updates/deletes in the legacy database 
 make dbt       # after stopping `make cdc`: refresh silver/gold, including gold.cdc_latency
 ```
 
+`make slot-check` reports how much WAL the replication slot holds and fails above 512 MB
+(the database caps it at 1 GB); `make slot-drill` pushes the slot past the cap with the loader
+stopped and checks the alert and the recovery. The recovery is a new snapshot, which replaces the
+CDC change history (and so `gold.cdc_latency`); run the drill before a `make cdc` demo, not after.
+
 DuckDB allows one writer at a time. The CDC loader opens the lakehouse only while it writes a
 batch and retries on the next poll if the file is busy, but `make dbt` can still fail if it starts
 in the middle of a write; stopping `make cdc` first avoids that.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed pbm synthea ingest dbt
-conformance fhir-validate-carin` on a clean runner. The run fails if a model or data test fails, if
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed pbm synthea ingest slot-drill
+dbt conformance fhir-validate-carin` on a clean runner. The run fails if the slot drill fails, if a
+model or data test fails, if
 any shareable SQL on FHIR test fails, or if the HL7 validator reports an error against the CARIN
 Blue Button profiles in the sample.
 
@@ -148,7 +156,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
 | Identity resolution | PBM cardholders linked to members with 100% precision and 98.2% recall against ground truth (deterministic baseline: 99.5% and 93.8%); 69 uncertain matches sent to review |
-| FHIR validation     | 0 errors on a 1,400-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved (terminology not checked); 1,000 of 1,000 failed before remediation |
+| FHIR validation     | 0 errors on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved (terminology not checked); 1,000 of 1,000 failed before remediation |
 
 ## Roadmap
 
@@ -159,6 +167,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Phase 5 – Dissemination:** technical write-up and reusable migration checklist
 - [x] **Phase 6 – Profile conformance:** CARIN Blue Button 2.1.0 profiles (baseline, remediation, Organization resources, reference checks), validated in CI
 - [x] **Phase 7 – Identity resolution:** a PBM feed with the same members under other IDs, probabilistic matching (Splink) against a deterministic baseline, measured against ground truth, through to FHIR
+- [x] **Operations – Slot monitoring:** a WAL retention cap, an alert outside the loader, slot lag history in gold, recovery from a lost slot, and a drill in CI
 
 ## Project structure
 

@@ -23,6 +23,15 @@ Usage:
     python ingestion/cdc_legacy.py sync --follow -i 5    # keep polling every 5 seconds
     python ingestion/cdc_legacy.py snapshot              # force a new slot and snapshot
     python ingestion/cdc_legacy.py drop-slot             # release the slot (stops WAL retention)
+    python ingestion/cdc_legacy.py slot-status           # check slot lag; exit 1 above the threshold
+
+Slot monitoring. The slot makes Postgres keep WAL until it is consumed, and
+the legacy database caps that retention (max_slot_wal_keep_size). Past the
+cap, Postgres invalidates the slot (wal_status = 'lost') instead of filling
+the disk. Every sync records the slot state in bronze._cdc_slot_status
+(history for gold.cdc_slot_lag), and a lost slot triggers a new snapshot.
+`slot-status` reads only Postgres, so it still works when the loader or the
+lakehouse is stuck, which is when the lag grows.
 """
 
 import argparse
@@ -33,6 +42,7 @@ from pathlib import Path
 
 import duckdb
 import psycopg
+from psycopg.rows import dict_row
 
 from common import connect, log_load, logged_load, new_run_id
 
@@ -44,6 +54,10 @@ SLOT = "lakehouse_cdc"
 TABLES = ["pln", "mbr_mstr", "elig_span", "prv", "clm_hdr", "clm_ln", "pa_req"]
 BATCH_FILE = Path("data/cdc_batch.ndjson")
 MAX_CHANGES_PER_BATCH = 200_000
+# slot-status fails above this much retained WAL: half the cap set in
+# docker-compose.yml (max_slot_wal_keep_size = 1GB), so the alert comes well
+# before Postgres invalidates the slot. MB here means MiB, as in Postgres.
+DEFAULT_MAX_RETAINED_MB = 512
 
 WAL2JSON_OPTIONS = [
     "format-version", "2",
@@ -87,6 +101,51 @@ def slot_exists(pg) -> bool:
     return pg.execute(
         "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s", [SLOT]
     ).fetchone() is not None
+
+
+def slot_status(pg):
+    """Current state of the slot, or None if it does not exist.
+
+    retained_bytes: WAL Postgres keeps for the slot (what the cap measures).
+    pending_bytes: WAL written since the last change the loader confirmed.
+    retained_bytes is NULL once the slot is lost (Postgres clears restart_lsn). safe_wal_size is how much more WAL can
+    be written before the slot is at risk (NULL without a cap).
+    """
+    with pg.cursor(row_factory=dict_row) as cur:
+        return cur.execute(
+            """
+            SELECT slot_name,
+                   active,
+                   wal_status,
+                   pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint         AS retained_bytes,
+                   pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint AS pending_bytes,
+                   safe_wal_size
+            FROM pg_replication_slots
+            WHERE slot_name = %s
+            """,
+            [SLOT],
+        ).fetchone()
+
+
+def record_slot_status(con, status: dict, action: str) -> None:
+    """Append one observation of the slot to bronze._cdc_slot_status."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bronze._cdc_slot_status (
+            observed_at     TIMESTAMPTZ,
+            slot_name       VARCHAR,
+            active          BOOLEAN,
+            wal_status      VARCHAR,
+            retained_bytes  BIGINT,
+            pending_bytes   BIGINT,
+            safe_wal_size   BIGINT,
+            action          VARCHAR
+        )
+    """)
+    con.execute(
+        "INSERT INTO bronze._cdc_slot_status VALUES (current_timestamp, ?, ?, ?, ?, ?, ?, ?)",
+        [status["slot_name"], status["active"], status["wal_status"], status["retained_bytes"],
+         status["pending_bytes"], status["safe_wal_size"], action],
+    )
 
 
 def drop_slot(pg) -> None:
@@ -269,10 +328,13 @@ def ensure_seq_column(con) -> None:
 
 def sync_once(pg) -> int:
     """Drain the slot once. Returns the number of changes applied."""
+    status = slot_status(pg)
     con = connect()
     try:
         state = read_state(con)
         ensure_seq_column(con)
+        # The backlog accumulated since the previous sync.
+        record_slot_status(con, status, "sync")
     finally:
         con.close()
     last_lsn = state[1]
@@ -296,21 +358,38 @@ def sync_once(pg) -> int:
     return total
 
 
-def sync(follow: bool, interval: float) -> None:
+def ensure_usable_slot(pg) -> None:
+    """Take a snapshot when there is no state, no slot, or the slot was lost.
+
+    A lost slot can no longer return changes: Postgres removed WAL the loader
+    had not read. The observation is recorded before the new snapshot, so the
+    loss stays in the history (gold.cdc_slot_lag counts it).
+    """
     con = connect()
     try:
         state = read_state(con)
+        status = slot_status(pg)
+        lost = status is not None and status["wal_status"] == "lost"
+        if lost:
+            record_slot_status(con, status, "resnapshot")
     finally:
         con.close()
-    with psycopg.connect(PG_DSN, autocommit=True) as pg:
-        needs_snapshot = state is None or not slot_exists(pg)
-    if needs_snapshot:
+    if lost:
+        print(f"Replication slot {SLOT} was invalidated (WAL retention cap exceeded): "
+              "taking a new snapshot.")
+        snapshot()
+    elif state is None or status is None:
         print("No active CDC slot/state found: taking an initial snapshot.")
         snapshot()
 
+
+def sync(follow: bool, interval: float) -> None:
     with psycopg.connect(PG_DSN, autocommit=True) as pg:
         while True:
             try:
+                # Checked on every poll: in follow mode the slot can be lost
+                # while the loader runs (e.g. a long stall on a locked lakehouse).
+                ensure_usable_slot(pg)
                 n = sync_once(pg)
                 if n or not follow:
                     print(f"Applied {n} changes.")
@@ -325,6 +404,34 @@ def sync(follow: bool, interval: float) -> None:
             time.sleep(interval)
 
 
+def check_slot(max_retained_mb: float) -> int:
+    """Print the slot state; return 1 if it needs attention, else 0."""
+    with psycopg.connect(PG_DSN, autocommit=True) as pg:
+        status = slot_status(pg)
+    if status is None:
+        print(f"FAIL: replication slot {SLOT} does not exist (run make ingest).")
+        return 1
+
+    def mb(value):
+        return "n/a" if value is None else f"{value / 2**20:,.1f} MB"
+
+    print(f"slot={status['slot_name']} active={status['active']} wal_status={status['wal_status']} "
+          f"retained={mb(status['retained_bytes'])} pending={mb(status['pending_bytes'])} "
+          f"safe_wal_size={mb(status['safe_wal_size'])}")
+    problems = []
+    if status["wal_status"] == "lost":
+        problems.append("the slot was invalidated; the next sync takes a new snapshot")
+    elif status["wal_status"] == "unreserved":
+        problems.append("WAL beyond the retention cap; the next checkpoint invalidates the slot")
+    if status["retained_bytes"] is not None and status["retained_bytes"] > max_retained_mb * 2**20:
+        problems.append(f"retained WAL above {max_retained_mb:,.0f} MB; is the CDC loader running?")
+    for p in problems:
+        print(f"FAIL: {p}")
+    if not problems:
+        print("OK")
+    return 1 if problems else 0
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -333,6 +440,9 @@ def main() -> None:
     s.add_argument("-i", "--interval", type=float, default=5.0, help="seconds between polls")
     sub.add_parser("snapshot", help="drop the slot and take a new full snapshot")
     sub.add_parser("drop-slot", help="drop the replication slot")
+    c = sub.add_parser("slot-status", help="check replication slot lag (exit 1 if it needs attention)")
+    c.add_argument("--max-retained-mb", type=float, default=DEFAULT_MAX_RETAINED_MB,
+                   help=f"fail above this much retained WAL (default {DEFAULT_MAX_RETAINED_MB})")
     args = ap.parse_args()
 
     if args.command == "sync":
@@ -345,6 +455,8 @@ def main() -> None:
     elif args.command == "drop-slot":
         with psycopg.connect(PG_DSN, autocommit=True) as pg:
             drop_slot(pg)
+    elif args.command == "slot-status":
+        raise SystemExit(check_slot(args.max_retained_mb))
 
 
 if __name__ == "__main__":

@@ -316,6 +316,42 @@ models:
       - name: last_loaded_at
         description: Arrival time of the most recent captured change.
 
+  - name: cdc_slot_lag
+    description: >
+      Lag of the CDC replication slot, from the observations the loader records before
+      each sync: how much WAL Postgres retained for the slot and how much was pending,
+      how long the loader went between syncs, and how often the slot was lost.
+    columns:
+      - name: slot_name
+        description: Replication slot name.
+        data_tests: [unique, not_null]
+      - name: observations
+        description: Observations recorded (one per sync, plus one per slot loss).
+      - name: slot_losses
+        description: Times the loader found the slot invalidated and took a new snapshot.
+      - name: first_observed_at
+        description: Time of the first observation.
+      - name: last_observed_at
+        description: Time of the most recent observation.
+      - name: max_seconds_between_syncs
+        description: Longest gap between two observations, in seconds.
+      - name: p95_pending_mb
+        description: 95th percentile of the WAL pending at the start of a sync, in MB (MiB).
+      - name: max_pending_mb
+        description: Largest WAL pending at the start of a sync, in MB (MiB).
+      - name: max_retained_mb
+        description: Largest WAL retained for the slot, in MB (MiB). The cap is 1,024 MB.
+      - name: last_wal_status
+        description: >
+          Postgres wal_status in the most recent observation: reserved, extended,
+          unreserved (beyond the cap, at risk) or lost.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [reserved, extended, unreserved, lost]
+      - name: last_retained_mb
+        description: WAL retained for the slot in the most recent observation, in MB (MiB).
+
   - name: fhir_view_parity
     description: >
       Rows found on only one side when a ViewDefinition output is compared with the table it
