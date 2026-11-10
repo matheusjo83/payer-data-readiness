@@ -9,14 +9,19 @@ cardinality, data types, invariants and value sets it can expand locally, but
 not whether codes such as CPT, ICD-10-CM or NDC exist in their code systems.
 With --tx <url> (make fhir-validate-carin uses https://tx.fhir.org), a
 terminology server checks the codes too. Codes of code systems the server does
-not have (NUBC revenue codes, the NCPDP stub) are counted as unverified. The
-lakehouse checks every code, not a sample, in gold.terminology_code_check.
+not have (NUBC revenue codes, the NCPDP stub, the Source of Payment Typology)
+are counted as unverified. The lakehouse checks every code, not a sample, in
+gold.terminology_code_check. Two warnings the data cannot remove (see
+KNOWN_WARNINGS: CARIN's claim identifier type, and tx.fhir.org's outdated NDC)
+are counted apart as known warnings, with the reason in the summary.
 
 Two modes:
 
   default          base FHIR R4 (4.0.1): one file per resource, with meta.profile
                    removed from the exported copy so that only the base
-                   specification applies. Writes data/fhir_validation/.
+                   specification applies (the CARIN package is loaded only for
+                   the definitions of its code systems). Writes
+                   data/fhir_validation/.
   --ig carin-bb    the CARIN Blue Button IG (STU 2.1.0, the version CMS
                    recommends for the Patient Access API), against the profile
                    each resource declares. Each ExplanationOfBenefit profile, and
@@ -87,7 +92,9 @@ CARIN_SAMPLES = {
 BUNDLE_BASE = "https://payer-data-readiness.example/fhir/"
 SAMPLE_SEED = 42
 # Code systems whose content is not distributed (the terminology package has
-# only a stub, and tx.fhir.org does not have it either: NUBC is licensed).
+# only a stub, and tx.fhir.org does not have it either: NUBC is licensed, and
+# the Source of Payment Typology of Coverage.type is published by NAHDO with
+# content not-present).
 # Without a terminology server (-tx n/a) the validator reports their codes as
 # errors although nothing is wrong with them; with tx.fhir.org the same codes
 # get a warning ("could not be found, so the code cannot be validated"). Both
@@ -95,6 +102,28 @@ SAMPLE_SEED = 42
 UNDISTRIBUTED_CODE_SYSTEMS = {
     "http://terminology.hl7.org/CodeSystem/NCPDPDispensedAsWrittenOrProductSelectionCode",
     "https://www.nubc.org/CodeSystem/RevenueCodes",
+    "https://nahdo.org/sopt",
+}
+# Warnings that the data cannot remove, each with the reason. They are counted
+# apart (known_warnings), listed in the summary, and never cover an error.
+KNOWN_WARNINGS = {
+    # CARIN requires these identifier types: uc (unique claim ID) on an EOB, MB
+    # (member number) on a Patient's member ID. The base FHIR IdentifierType value
+    # set (extensible) has no code for either, so the validator warns where the
+    # base binding applies, as it does on CARIN's own examples.
+    "ig_required_identifier_type": (
+        lambda text, where: "value set 'IdentifierType'" in text
+                            and ("C4BBIdentifierType#uc" in text or "v2-0203#MB)" in text),
+        "CARIN requires the identifier types uc (claim) and MB (member); the base IdentifierType "
+        "value set has no code for a claim or member number"),
+    # tx.fhir.org serves the NDC as of 2021-11-01 and marks every code in it inactive,
+    # including products still marketed; gold.terminology_code_check checks the
+    # NDCs against the FDA's current NDC Directory instead.
+    "tx_ndc_snapshot": (
+        lambda text, where: "has a status of inactive" in text and "productOrService" in where
+                            and re.search(r"concept '\d{11}'", text) is not None,
+        "tx.fhir.org's NDC is a 2021-11-01 snapshot that marks every code inactive; the lakehouse "
+        "checks NDCs against the current FDA NDC Directory"),
 }
 
 
@@ -199,6 +228,7 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
     outcomes = [e["resource"] for e in results.get("entry", [])] if results.get("resourceType") == "Bundle" else [results]
     per_type = {t: Counter() for t in counts}
     messages = Counter()
+    known_counts = Counter()
     for oo in outcomes:
         source = next((ext.get("valueString", "") for ext in oo.get("extension", [])
                        if ext.get("url", "").endswith("operationoutcome-file")), "")
@@ -210,6 +240,13 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
             if severity in ("error", "warning") and any(f"CodeSystem '{cs}'" in text and "could not be found" in text
                                                          for cs in UNDISTRIBUTED_CODE_SYSTEMS):
                 per_type.setdefault(rtype, Counter())["terminology_unverified"] += 1
+                continue
+            where_raw = (issue.get("expression") or issue.get("location") or [""])[0]
+            known = next((k for k, (match, _) in KNOWN_WARNINGS.items()
+                          if severity == "warning" and match(text, where_raw)), None)
+            if known:
+                per_type.setdefault(rtype, Counter())["known_warnings"] += 1
+                known_counts[known] += 1
                 continue
             if severity in ("fatal", "error"):
                 files_with_errors = True
@@ -230,9 +267,12 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
                             "errors": per_type[t]["error"],
                             "warnings": per_type[t]["warning"],
                             "terminology_unverified": per_type[t]["terminology_unverified"],
+                            "known_warnings": per_type[t]["known_warnings"],
                             "unresolved_references": len(unresolved.get(t, []))} for t in counts},
         "unresolved_references": {t: refs[:20] for t, refs in unresolved.items() if refs},
         "undistributed_code_systems": sorted(UNDISTRIBUTED_CODE_SYSTEMS),
+        "known_warnings": {k: {"count": known_counts[k], "reason": reason}
+                           for k, (_, reason) in KNOWN_WARNINGS.items()},
         "top_messages": [{"resource": r, "severity": s, "message": m, "count": n}
                          for (r, s, m), n in messages.most_common(top)],
     }
@@ -252,14 +292,20 @@ def main() -> None:
         OUT_DIR = Path(f"data/fhir_validation_{args.ig}")
     download_validator()
     counts, unresolved = export_sample(args.sample, CARIN_SAMPLES if args.ig else BASE_SAMPLES, bundles=bool(args.ig))
-    extra = ["-ig", CARIN_PACKAGE] if args.ig else []
+    # The base mode loads the CARIN package too, but only as definitions (its code
+    # systems): the exported copies carry no meta.profile, so no profile applies.
+    extra = ["-ig", CARIN_PACKAGE]
     summary = summarize(run_validator(extra, args.tx), counts, unresolved, CARIN_PACKAGE if args.ig else None,
                         args.top, args.tx)
 
     width = max(map(len, summary["by_resource"])) + 1
-    print(f"\n{'Resource':{width}} {'Validated':>9} {'With errors':>11} {'Errors':>7} {'Warnings':>8} {'Tx unverified':>13}")
+    print(f"\n{'Resource':{width}} {'Validated':>9} {'With errors':>11} {'Errors':>7} {'Warnings':>8} "
+          f"{'Tx unverified':>13} {'Known':>6}")
     for t, s in summary["by_resource"].items():
-        print(f"{t:{width}} {s['validated']:>9} {s['resources_with_errors']:>11} {s['errors']:>7} {s['warnings']:>8} {s['terminology_unverified']:>13}")
+        print(f"{t:{width}} {s['validated']:>9} {s['resources_with_errors']:>11} {s['errors']:>7} {s['warnings']:>8} "
+              f"{s['terminology_unverified']:>13} {s['known_warnings']:>6}")
+    for k, v in summary["known_warnings"].items():
+        print(f"  known warning {k}: {v['count']} ({v['reason']})")
     for m in summary["top_messages"]:
         print(f"  [{m['severity']}] {m['resource']} x{m['count']}: {m['message']}")
     print(f"\nSummary written to {OUT_DIR / 'summary.json'}")

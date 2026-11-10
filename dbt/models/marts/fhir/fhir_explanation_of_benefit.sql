@@ -136,6 +136,11 @@ select
         'meta', json_object(
             'lastUpdated', strftime(c.updated_at, '%Y-%m-%dT%H:%M:%SZ'),
             'profile', json_array(c.profile)),
+        'text', {{ fhir_narrative("concat_ws(', ', upper(c.claim_type[1]) || c.claim_type[2:] || ' claim ' || c.claim_id,
+            'member ' || c.member_id,
+            'service ' || strftime(c.service_from_date, '%Y-%m-%d') || ' to ' || strftime(c.service_to_date, '%Y-%m-%d'),
+            'charged ' || c.total_charged || ' USD',
+            'paid ' || c.total_paid || ' USD')") }},
         'identifier', json_array(json_object(
             'type', json_object('coding', json_array(json_object(
                 'system', '{{ c4bb }}C4BBIdentifierType',
@@ -186,6 +191,11 @@ select
         'meta', json_object(
             'lastUpdated', strftime(c.processed_at, '%Y-%m-%dT%H:%M:%SZ'),
             'profile', json_array({{ carin_profile('C4BB-ExplanationOfBenefit-Pharmacy') }})),
+        'text', {{ fhir_narrative("concat_ws(', ', 'Pharmacy claim ' || c.rx_claim_id,
+            'member ' || c.member_id,
+            'filled ' || strftime(c.fill_date, '%Y-%m-%d'),
+            'NDC ' || c.ndc_code,
+            'plan paid ' || c.plan_paid || ' USD')") }},
         'identifier', json_array(json_object(
             'type', json_object('coding', json_array(json_object(
                 'system', '{{ c4bb }}C4BBIdentifierType',

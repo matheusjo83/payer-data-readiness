@@ -120,8 +120,9 @@ models:
   - name: pbm_duplicate_pairs
     description: >
       Likely duplicate pairs of PBM cardholders (match probability at or above
-      identity_review_probability) with the decision for each: merged automatically, sent to
-      review, or decided by a reviewer (see the model for the rules).
+      identity_review_probability, or both cardholders with the same likely legacy candidate)
+      with the decision for each: merged automatically, sent to review, or decided by a
+      reviewer (see the model for the rules).
     data_tests:
       - unique_combination:
           arguments:
@@ -139,6 +140,8 @@ models:
         description: True when the first names disagree completely.
       - name: linked_to_different_members
         description: True when each cardholder has a strong legacy candidate and the candidates are different members.
+      - name: same_legacy_candidate
+        description: True when both cardholders have the same legacy member as their likely candidate (match probability at or above identity_review_probability).
       - name: model_status
         description: duplicate or review, by the model alone.
         data_tests:
@@ -147,8 +150,9 @@ models:
                 values: [duplicate, review]
       - name: review_reason
         description: >
-          Why the model sent the pair to review: probability_below_auto_link,
-          first_name_disagrees or different_legacy_members.
+          Why the model sent the pair to review: same_legacy_candidate (the pair's own score is
+          below identity_review_probability, but both cardholders have the same likely member),
+          probability_below_auto_link, first_name_disagrees or different_legacy_members.
       - name: status
         description: duplicate, review or distinct, after the review decisions.
         data_tests:

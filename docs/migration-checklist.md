@@ -192,6 +192,11 @@ platform.
   ID, not by physical row order, which can change on every rebuild.
   *In this repo:* `fhir/validate.py` with the HL7 FHIR validator, against base FHIR R4 and against
   CARIN Blue Button 2.1.0, in CI.
+- [ ] **Trace every validator warning to its cause.** Fix the ones the mapping causes; when the
+  data cannot remove one (a code the profile requires but the base value set lacks, an outdated
+  terminology server), count it apart with the reason instead of hiding it or adding a wrong code.
+  *In this repo:* narratives, Payer Type codes and the NPI type were fixed; `KNOWN_WARNINGS` in
+  `fhir/validate.py` lists the two that remain.
 - [ ] **Prove that each check can fail.** Run parity checks and validators against deliberately
   broken input and confirm they report the expected number of failures.
   *In this repo:* the sabotage runs reported in the [results](results.md#fhir-phases-4-and-6).
