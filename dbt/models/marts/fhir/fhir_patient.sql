@@ -14,6 +14,10 @@ select
         'resourceType', 'Patient',
         'id', m.member_id,
         'meta', {{ carin_meta('C4BB-Patient', 'm.updated_at') }},
+        'text', {{ fhir_narrative("concat_ws(', ', 'Member ' || m.member_id,
+            nullif(trim(concat(first_name, ' ', last_name)), ''),
+            'born ' || strftime(birth_date, '%Y-%m-%d'),
+            'gender ' || case when gender in ('male', 'female') then gender else 'unknown' end)") }},
         'identifier', list_concat(
             [{{ member_identifier("'https://payer-data-readiness.example/member-id'", 'm.member_id') }}],
             coalesce(x.cardholder_identifiers, [])),

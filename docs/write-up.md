@@ -327,7 +327,8 @@ produced 51. Each number is the one the change should cause.
 
 Finally, Claude Code ran the official HL7 FHIR validator on a reproducible sample of 200 resources per type.
 It reported zero errors. All 600 warnings are the best-practice recommendation that resources carry
-a human-readable narrative, which these resources do not. As with the parity test, Claude Code checked
+a human-readable narrative, which these resources did not have then (they do now; see Cleaning up
+the warnings). As with the parity test, Claude Code checked
 that the validator fails when it should. It rejected hand-made resources with the legacy problems the mapping avoids: a
 null value, gender `invalid`, a `YYYYMMDD` date, an empty array and missing required elements.
 
@@ -450,10 +451,11 @@ split into M54.50, M54.51 and M54.59, and a category cannot be billed. Every cla
 server could not have said so. The generator now writes M54.50 from that date. A test fails the
 build on any invalid code, and the check rejected each of four deliberately wrong codes.
 
-The two checks disagree on one point, and I left the disagreement visible. tx.fhir.org reports all
-ten NDCs as inactive, while the FDA directory lists every one of them as marketed, with no end
-date. The lakehouse follows the FDA, which publishes the code system, and the validator's warning
-stays in the results.
+The two checks disagreed on one point. tx.fhir.org reported all ten NDCs as inactive, while the
+FDA directory lists every one of them as marketed, with no end date. Asked directly, the server
+turned out to serve the NDC as of November 2021 and to mark every code in it inactive, including
+drugs marketed since 1987; anything launched since then it does not know. The lakehouse follows
+the FDA, which publishes the code system.
 
 ## Working the review queue, and duplicates within a source
 
@@ -471,31 +473,67 @@ once. Claude Code presented the options for both, and I chose its recommendation
   FHIR identifiers and the exported claims.
 - **Duplicates.** The generator now gives 3% of the people a second cardholder ID, keyed again with
   a new address or a typo, as when a PBM reissues a card. A second Splink model deduplicates the
-  PBM's own records, under the same rules as the linkage, plus one more: when the payer's records
-  say the two cardholders are different members, they are not merged automatically.
+  PBM's own records, under the same rules as the linkage, plus the payer's view: when the payer's
+  records say the two cardholders are different members, they are not merged automatically, and
+  when both point to the same member, the pair goes to review.
 
 Duplicates made the linkage harder before they made it better. Two cardholder IDs of one person
 both point to the same member, which looks like two people claiming one member, so until the pair
-is merged both go to review; 20 of the 136 decisions are such cases. Once duplicates are grouped
+is merged both go to review; 50 of the 183 decisions are such cases. Once duplicates are grouped
 into persons, the IDs of one person may share a member, and deciding one case can put another in
 the queue, so the simulated reviewer runs in rounds until the queue is empty (on this data, the
-first round decided all 136 cases and the second found none). Started from an empty seed, it
-wrote the committed seed again, byte for byte. The model links 2,928 of the 2,991 member cardholder IDs with no wrong link; review adds
-30, all of them correct, and rejects 44 look-alikes and twins. The 33 still missing scored below
-the review threshold, so no reviewer ever sees them. That is the cost of the threshold, and it is
-the number to watch if this were real. Deduplication merges 80 of the 94 duplicate pairs on its
-own and 93 after review, none wrongly. A test now fails the build if a reviewed link is wrong; I
-checked that it fails by flipping one decision on a look-alike to a match.
+first round decided all 183 cases and the second found none). Started from an empty seed, it
+writes the committed seed again, byte for byte. The model links 2,928 of the 2,991 member
+cardholder IDs with no wrong link; review adds 30, all of them correct, and rejects 44 look-alikes
+and twins. The 33 still missing scored below the review threshold, so no reviewer ever sees them.
+That is the cost of the threshold, and it is the number to watch if this were real.
+Deduplication merges 62 of the 94 duplicate pairs on its own and 93 after review, none wrongly. A
+test now fails the build if a reviewed link is wrong; I checked that it fails by flipping one
+decision on a look-alike to a match.
+
+## Cleaning up the warnings
+
+After the merge, the CI run passed but showed warnings, and I asked for the project to be
+completely clean. Claude Code sorted every warning in the run by cause before changing anything,
+and I chose to treat all of them.
+
+- **The CI itself.** Two actions still targeted Node.js 20 and the runner label was about to move
+  to a new Ubuntu release. The actions were updated and the runner pinned to `ubuntu-24.04`, which
+  also suits a project that pins everything else.
+- **Synthea.** It warned that its records referenced organizations and practitioners it did not
+  export. Turning off its transaction bundles would have silenced the warning but rewritten the
+  references in most files; exporting the providers silenced it and left every existing file
+  unchanged, which Claude Code confirmed file by file.
+- **The deduplication model.** Splink warned that three comparison levels were never trained and
+  fell back to defaults: the PBM's 94 true duplicate pairs are too few. The model now takes its m
+  probabilities from the PBM-to-payer linkage, which has thousands of true pairs. It merges fewer
+  pairs by itself, all correctly. Regenerating the review decisions for the new model then made a
+  test fail: two duplicate cardholder IDs, each confirmed as the right member, remained two PBM
+  persons, because their pair scored too low for review. The rule was missing one direction of the
+  payer's evidence; a pair whose cardholders share a likely member now goes to review. The old
+  model had hidden the gap by scoring those pairs higher.
+- **The validator.** 10,101 warnings on the CARIN sample, of five kinds. Three were ours: no
+  narrative, no Payer Type code on Coverage, and an NPI type outside the base value set. All three
+  are fixed. Two cannot be fixed in the data: CARIN requires an identifier type for claims that the
+  base value set lacks (CARIN's own examples get the same warning), and tx.fhir.org's NDC is a 2021
+  snapshot. Those are counted apart, with their reason, rather than hidden or worked around with a
+  code that would be wrong.
+
+What remains is deliberate or outside the project: the six dbt warnings that count the issues
+injected into the legacy data and the slot the drill drops (they are the evidence, not noise), and
+one line from the Java runtime inside the pinned Synthea release.
 
 ## What this does not show, and what would change for production
 
 - **Terminology.** CPT and NUBC revenue codes are licensed, so nothing here checks them, and the
   NCPDP dispense as written code is published only as a stub; all three are reported as
   unverified. The NDC check depends on the FDA's current directory, which cannot be pinned, and
-  tx.fhir.org is a public test server whose content changes. A production Patient Access API would
-  need a terminology server of its own with the licensed code systems, plus narratives. The
-  validator covers a sample; the code check in dbt covers every resource, but only the code
-  systems it has.
+  tx.fhir.org is a public test server whose content changes (its NDC is from 2021). Nothing checks
+  the Payer Type codes either: their code system is published without content. A production
+  Patient Access API would need a terminology server of its own with the licensed code systems.
+  The narratives here are generated one-line summaries, enough for `dom-6` but not a designed
+  human-readable view. The validator covers a sample; the code check in dbt covers every
+  resource, but only the code systems it has.
 - **Scale and concurrency.** DuckDB's single writer shapes the orchestration. At scale, the next step
   would be to move to a table format with concurrent writers, such as Iceberg or Delta, and materialize the CDC
   current state incrementally instead of rebuilding it with a window function over all changes.

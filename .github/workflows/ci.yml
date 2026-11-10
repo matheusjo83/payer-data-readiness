@@ -21,17 +21,24 @@ concurrency:
 
 jobs:
   pipeline:
-    runs-on: ubuntu-latest
+    # Pinned, like the generators: ubuntu-latest moves to a new release on its own.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      # The checkout's `git init` and pip print hints about their defaults otherwise.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: main
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -39,13 +46,13 @@ jobs:
       # Synthea and the HL7 validator are pinned in these scripts; the cache key
       # changes when either version does.
       - name: Cache tool jars
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tools/*.jar
           key: tools-${{ hashFiles('scripts/generate_synthea.sh', 'fhir/validate.py') }}
 
       - name: Cache FHIR packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.fhir/packages
           key: fhir-packages-${{ hashFiles('fhir/validate.py') }}
@@ -57,7 +64,7 @@ jobs:
         run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
 
       - name: Cache code system releases
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             data/terminology/*.zip
@@ -99,7 +106,7 @@ jobs:
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reports
           if-no-files-found: ignore

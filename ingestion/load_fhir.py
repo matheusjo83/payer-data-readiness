@@ -25,7 +25,9 @@ def main() -> None:
     run_id = new_run_id()
     try:
         for path in files:
-            resource_type = path.stem
+            # Patient.ndjson, or Organization.1790553600000.ndjson for the provider
+            # files Synthea exports apart (the number is the reference date in ms).
+            resource_type = path.name.split(".")[0]
             target = f"bronze.fhir_{to_snake(resource_type)}"
             with logged_load(con, run_id, f"synthea.{resource_type}", target):
                 con.execute(f"""

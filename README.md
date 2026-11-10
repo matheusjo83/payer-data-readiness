@@ -55,7 +55,9 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   the public CMS and FDA code lists checked in dbt against every resource, with CPT left
   unverified because it is licensed) and how to finish identity resolution (reviewer decisions in
   a versioned dbt seed applied over the model, with an audit trail and a simulated reviewer, and a
-  second Splink model that deduplicates the PBM's own cardholders).
+  second Splink model that deduplicates the PBM's own cardholders). When the merged CI run still
+  showed warnings, Matheus asked for the project to be completely clean and chose to treat every
+  warning Claude Code traced, rather than only document them.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -162,7 +164,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
 | Identity resolution | PBM cardholders linked to members with 100% precision and 97.9% recall against ground truth (deterministic baseline: 99.5% and 93.4%), 98.9% after the review queue was worked; 93 of 94 duplicate cardholder IDs within the PBM merged, none wrongly |
-| FHIR validation     | 0 errors on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved, codes checked by tx.fhir.org; 1,000 of 1,000 failed before remediation |
+| FHIR validation     | 0 errors and 0 warnings on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved, codes checked by tx.fhir.org (two warnings the data cannot remove counted apart, with their reason); 1,000 of 1,000 failed before remediation |
 | Terminology         | Every ICD-10-CM, NDC and place of service code in the 29,224 exported claims valid on its service date (CMS and FDA releases); CPT, NUBC and NCPDP codes counted as unverified |
 
 ## Roadmap
@@ -177,6 +179,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Operations – Slot monitoring:** a WAL retention cap, an alert outside the loader, slot lag history in gold, recovery from a lost slot, and a drill in CI
 - [x] **Terminology:** codes checked by tx.fhir.org in the CARIN validation, and every code in every exported claim checked in dbt against the CMS ICD-10-CM and FDA NDC releases
 - [x] **Identity – Review and deduplication:** reviewer decisions as a versioned seed with an audit trail, a simulated reviewer, and duplicate cardholders within the PBM merged by a second Splink model
+- [x] **Cleanup:** every CI, Synthea, Splink and validator warning traced to its cause and fixed, or counted apart when the data cannot remove it
 - [ ] **FHIR API:** a HAPI FHIR server loaded from gold (search and Bulk `$export`), with prior authorization as PDex ExplanationOfBenefit
 - [ ] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
 

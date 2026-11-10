@@ -136,6 +136,10 @@ guide CMS recommends for the Patient Access API. Each resource declares its prof
 Outpatient-Institutional or Pharmacy profile from its claim type and type of bill. The payer and the
 providers (clinics) are Organization resources that the other resources reference.
 
+- **Narrative and plan type.** Every resource carries a generated narrative (`text`, macro
+  `fhir_narrative`) built from its own data, and each Coverage the plan's Source of Payment
+  Typology code (the Payer Type value set CARIN binds). An NPI is typed `NPI`, as CARIN requires,
+  and `PRN`, the base FHIR code that fits it.
 - **Nothing invented.** Legacy gender codes outside M/F/U become `unknown`, which the profile
   requires in place of an omitted gender and which states that the value is not known; the invalid
   source codes stay counted in `gold.dq_issue_summary`. Invalid NPIs would be left out of the
@@ -157,7 +161,10 @@ providers (clinics) are Organization resources that the other resources referenc
   pull request, with tx.fhir.org as the terminology server, so codes are checked too. `make
   fhir-validate` checks the same kind of sample against base FHIR R4 only, without a terminology
   server (`-tx n/a`). Codes from code systems the server does not have (NUBC revenue codes, the
-  NCPDP dispense as written code) are counted as unverified instead of failing the run.
+  NCPDP dispense as written code) are counted as unverified instead of failing the run. Two
+  warnings the data cannot remove are counted apart as known warnings, each with its reason
+  (`KNOWN_WARNINGS` in `fhir/validate.py`): the identifier types CARIN requires (`uc`, `MB`), which
+  the base value set lacks, and tx.fhir.org's NDC, a 2021 snapshot that marks every code inactive.
 - **Terminology, on every resource.** The validator sees a sample. `ingestion/load_terminology.py`
   loads the public code lists into bronze: the CMS ICD-10-CM releases for FY2021 to FY2026 (pinned
   by SHA-256) and the FDA NDC Directory (only the current one exists; its date and SHA-256 are
@@ -190,9 +197,13 @@ Identity resolution happens in the data layer, before anything reaches the API:
   same on every run. It is trained without labels.
 - **Deduplication within the PBM.** A PBM can reissue a card and key the same person again.
   `identity_pbm_duplicates_splink` runs the same comparisons with Splink's `dedupe_only` link type
-  on the cardholders alone; `pbm_duplicate_pairs` merges a pair automatically only when the match
-  is strong, the first names do not disagree completely and the payer's records do not say they
-  are two different members; `pbm_persons` groups merged pairs into persons.
+  on the cardholders alone. Its m probabilities come from the PBM-to-payer linkage, trained the
+  same way inside the model, because the PBM's own duplicates are too few to train every
+  comparison level; u and the prior come from the PBM's random pairs. `pbm_duplicate_pairs` merges
+  a pair automatically only when the match is strong, the first names do not disagree completely
+  and the payer's records do not say they are two different members; a pair whose cardholders
+  share a likely legacy candidate goes to review whatever its own score. `pbm_persons` groups
+  merged pairs into persons.
 - **Decisions.** `member_xref` links a cardholder automatically only when the match is strong, the
   first names do not disagree completely (relatives such as twins share last name, birth date and
   address), there is no second likely candidate and no other PBM person claims the member (the

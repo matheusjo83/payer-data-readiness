@@ -31,7 +31,11 @@ same; the FHIR totals grew by the PBM claims and pharmacies, reported separately
 v2.0.0, the PBM generator added duplicate cardholder IDs (from yet another random generator, so
 the rest of the feed did not change), which moved the identity figures, and the legacy generator
 replaced the ICD-10-CM code M54.5 with M54.50 on claims from October 2021 (see Terminology). The
-replacement draws no random number, so no other figure changed.
+replacement draws no random number, so no other figure changed. The cleanup of warnings that
+followed changed the deduplication model (its m now comes from the linkage) and with it the
+dedupe and review figures, added Synthea's provider files to the bronze loads, and added
+narratives and plan type codes to the FHIR resources; the linkage, terminology, parity and other
+figures did not change.
 
 ## Metrics
 
@@ -108,11 +112,14 @@ run) the PBM files.
 | Source                          | Loads | Successful | Rows loaded | Total load time |
 |---------------------------------|------:|-----------:|------------:|----------------:|
 | Legacy (Postgres, CDC snapshot) |     7 |          7 |     101,194 |          0.21 s |
-| Synthea (FHIR)                  |    20 |         20 |     610,239 |          3.81 s |
+| Synthea (FHIR)                  |    24 |         24 |     611,144 |          9.52 s |
 | PBM (pipe-delimited files)      |     4 |          4 |      11,516 |          0.07 s |
-| **Total**                       |    31 |         31 |     722,949 |          4.09 s |
+| **Total**                       |    35 |         35 |     723,854 |          9.80 s |
 
-Each table and resource type was loaded once, so the 100% success rate comes from a single run
+The Synthea row is from a later run, after Synthea started exporting the organizations, locations,
+practitioners and practitioner roles the patient records reference (905 more resources; the
+other files are unchanged). Load times depend on the machine and its load at the time. Each table
+and resource type was loaded once, so the 100% success rate comes from a single run
 and does not yet show a trend. The largest load was `Observation` (245,988 resources).
 
 ## Change data capture latency (Phase 2)
@@ -227,29 +234,37 @@ found three more problems that only show when references are resolved: the Organ
 had no `meta.lastUpdated`, about 90% of the synthetic NPIs had an invalid check digit, and one pharmacy
 code was rejected (see the note on terminology below).
 
-After remediation, with tx.fhir.org (run on 2026-11-10; two consecutive runs gave the same
-counts):
+After remediation, with tx.fhir.org (run on 2026-11-10):
 
-| Sample                         | Validated | With errors | Warnings | Codes not verifiable |
-|--------------------------------|----------:|------------:|---------:|---------------------:|
-| Patient                        |       200 |           0 |      200 |                    0 |
-| Coverage                       |       200 |           0 |      800 |                    0 |
-| Organization                   |       200 |           0 |      399 |                    0 |
-| EOB Professional-NonClinician  |       200 |           0 |    1,600 |                    0 |
-| EOB Inpatient-Institutional    |       200 |           0 |    1,600 |                  501 |
-| EOB Outpatient-Institutional   |       200 |           0 |    1,600 |                  483 |
-| EOB Pharmacy                   |       200 |           0 |    2,102 |                  200 |
-| EOB Pharmacy, PBM claims (Phase 7) |   200 |           0 |    1,800 |                  200 |
+| Sample                         | Validated | With errors | Warnings | Codes not verifiable | Known warnings |
+|--------------------------------|----------:|------------:|---------:|---------------------:|---------------:|
+| Patient                        |       200 |           0 |        0 |                    0 |              0 |
+| Coverage                       |       200 |           0 |        0 |                    0 |              0 |
+| Organization                   |       200 |           0 |        0 |                    0 |              0 |
+| EOB Professional-NonClinician  |       200 |           0 |        0 |                    0 |            200 |
+| EOB Inpatient-Institutional    |       200 |           0 |        0 |                  501 |            200 |
+| EOB Outpatient-Institutional   |       200 |           0 |        0 |                  483 |            200 |
+| EOB Pharmacy                   |       200 |           0 |        0 |                  200 |            702 |
+| EOB Pharmacy, PBM claims (Phase 7) |   200 |           0 |        0 |                  200 |            400 |
 
-Warning counts include the resources in each Bundle. They are the `dom-6` narrative
-recommendation; identifier types defined by CARIN rather than the base value set; `Coverage.type`
-without a Payer Type code; and, on the pharmacy samples, NDCs that tx.fhir.org reports as
-inactive (see Terminology below). Codes not verifiable are revenue codes (NUBC) and the NCPDP
-dispense as written code, whose code systems tx.fhir.org does not have: the validator says it
-cannot validate them, and they are counted apart and do not fail the run. tx.fhir.org reported no
-issue on the CPT, ICD-10-CM and place of service codes. Without a terminology server, as until
-v2.0.0, the professional and institutional samples had 2,642, 2,602 and 2,566 warnings, most of
-them place of service and revenue codes that could not be checked.
+Counts include the resources in each Bundle. Codes not verifiable are revenue codes (NUBC) and the
+NCPDP dispense as written code, whose code systems tx.fhir.org does not have: the validator says
+it cannot validate them, and they are counted apart and do not fail the run. tx.fhir.org reported
+no issue on the CPT, ICD-10-CM and place of service codes.
+
+Until this cleanup the same samples had 200 to 2,102 warnings each (10,101 in all). Each kind was
+traced to its cause:
+
+| Warning                                   | Count | Cause and treatment |
+|-------------------------------------------|------:|---------------------|
+| `dom-6`: no narrative                     | 6,000 | Every resource now carries a generated narrative (`text`, macro `fhir_narrative`), as CARIN's own examples do. Removed. |
+| `Coverage.type` without a Payer Type code | 1,200 | Each plan now has its Source of Payment Typology code (NAHDO SOPT v9.2: 511, 512, 11, 21, 23). Removed. The validator reports nothing on these codes: NAHDO publishes the code system without its content, and tx.fhir.org does not have it, so nothing checks them. |
+| `IdentifierType` on an Organization (NPI) | 1,199 | The base value set has no NPI code; v2-0203 `PRN` (provider number), which is in it, is added next to `NPI`. Removed. |
+| `IdentifierType` on an EOB (`uc`)         | 1,000 | CARIN requires `uc` (unique claim ID), and the base value set has no claim number code. CARIN's own examples get the same warning. Counted as a known warning. |
+| NDC "inactive" (tx.fhir.org)              |   702 | tx.fhir.org serves the NDC as of 2021-11-01 and marks every code in it inactive (see Terminology below). Counted as a known warning. |
+
+Known warnings are listed in `summary.json` with their reason (`fhir/validate.py`,
+`KNOWN_WARNINGS`), apply only to warnings, never to errors, and do not fail the run.
 
 Two checks sit outside the validator:
 
@@ -295,15 +310,21 @@ compiled SQL was run with four extra codes on a 2025 claim: M54.5 came out inval
 Z99.999 invalid (not in the release), NDC 00000000000 invalid (not in the directory) and place of
 service 98 invalid.
 
-The two checks disagree on one point. tx.fhir.org reports all 10 NDCs as inactive (a warning, 502
-on the pharmacy sample and 200 on the PBM one), while the FDA directory of 2026-11-10 lists every
-one of them with no marketing end date. The lakehouse follows the FDA, which publishes the code
-system. The FDA publishes only its current directory, so the NDC check cannot be pinned: the
+The two checks disagreed on one point: tx.fhir.org reported all 10 NDCs as inactive, while the FDA
+directory of 2026-11-10 lists every one of them with no marketing end date. Asked directly
+(`$validate-code`), tx.fhir.org answers from an NDC version dated 2021-11-01: it marked as inactive
+every NDC tried, including packages marketed since 1987 and still listed, and it does not know
+packages first marketed after 2021. Its `$lookup` for NDC fails with an error of its own. So no
+choice of NDC would remove the warning. The lakehouse follows the FDA, which publishes the code
+system, and the validation counts the warning as known. The FDA publishes only its current directory, so the NDC check cannot be pinned: the
 release date and SHA-256 of each load are recorded in `bronze.terminology_releases`, and a drug
 removed from the directory would make older claims fail.
 
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
-removed from the exported copies): 0 errors for Patient, Coverage and ExplanationOfBenefit. As a
+removed from the exported copies; the CARIN package is loaded only for its code systems): 0
+errors and 0 warnings for Patient, Coverage and ExplanationOfBenefit, with 519 known warnings (the
+identifier types CARIN requires, `uc` on the EOBs and `MB` on the members, where the base binding
+applies) and 129 codes not verifiable. As a
 check, the validator rejected hand-made resources with the legacy problems the mapping avoids (a
 null value, gender `invalid`, a `YYYYMMDD` date, an empty array, missing required elements).
 
@@ -364,12 +385,17 @@ bound).
   best candidate from 0.50 goes to review (`gold.identity_review_queue`), anything lower is
   unmatched.
 - *Deduplication within the PBM* (`gold.identity_pbm_duplicates_splink`): the same comparisons,
-  with Splink's `dedupe_only` link type on the cardholders alone. `gold.pbm_duplicate_pairs` merges
-  a pair automatically from 0.95 when the first names do not disagree completely and the two
-  cardholders do not have strong candidates that are different legacy members (the payer's
-  records say they are two people); a pair from 0.50 that fails a condition goes to review.
-  `gold.pbm_persons` groups the merged pairs into persons, and cardholder IDs of one person may
-  link to the same member.
+  with Splink's `dedupe_only` link type on the cardholders alone. Its m probabilities come from the
+  linkage of the PBM to the payer, trained the same way inside the model: the PBM's 94 true
+  duplicate pairs are too few for expectation maximisation to observe every comparison level
+  (a first model trained on them alone left three levels untrained, on Splink's default values).
+  u and the prior come from the PBM's own random pairs. `gold.pbm_duplicate_pairs` merges a pair
+  automatically from 0.95 when the first names do not disagree completely and the two cardholders
+  do not have strong candidates that are different legacy members (the payer's records say they
+  are two people); a pair from 0.50 that fails a condition goes to review, and so does a pair
+  whose two cardholders have the same likely legacy candidate (from 0.50), whatever its own score:
+  linking both to that member would make them one person. `gold.pbm_persons` groups the merged
+  pairs into persons, and cardholder IDs of one person may link to the same member.
 
 **Review.** The decisions of whoever works the queue live in a versioned dbt seed,
 `identity_review_decisions` (review type, cardholder, candidate, `match` or `no_match`, reviewer,
@@ -381,21 +407,23 @@ a decision applies while the model still proposes the case it decided, and a war
 (`assert_identity_review_decisions_apply`) flags the ones the data made stale. The project has no
 reviewers, so `scripts/review_identity_queue.py` (`make review`) stands in for them: it decides
 each case from the ground truth, appends the decisions to the seed and repeats with a rebuild until
-the queue is empty (a merged duplicate can change which member links compete; on this data one
-round decided all 136 cases). Once the duplicate pairs are merged, the model links the 20 cases
-queued because two PBM persons claimed the member on its own; their decisions still apply. A reviewer who reads
-the truth is always right, so the figures after review are an upper bound on what people would
-achieve. The seed holds 136 decisions:
+the queue is empty (a merged duplicate can change which member links compete; on this data the
+first round decided all 183 cases and the second found none). Once the duplicate pairs are merged,
+the model links the 50 cases queued because two PBM persons claimed the member on its own; their
+decisions still apply. A reviewer who reads the truth is always right, so the figures after review
+are an upper bound on what people would achieve. The seed holds 183 decisions, written from an
+empty seed after the dedupe model changed (the change made 24 earlier decisions stale, which the
+warning test reported):
 
 | Review type    | Queued because                               | Match | No match |
 |----------------|----------------------------------------------|------:|---------:|
 | Member link    | Best candidate below 0.95                     |     5 |       35 |
 | Member link    | First names disagree                          |    10 |        9 |
 | Member link    | A second candidate from 0.50                  |    15 |        — |
-| Member link    | Member claimed by another PBM person          |    20 |        — |
-| PBM duplicate  | Pair below 0.95                               |    13 |       18 |
-| PBM duplicate  | First names disagree                          |     — |        9 |
-| PBM duplicate  | Strong candidates are different members       |     — |        2 |
+| Member link    | Member claimed by another PBM person          |    50 |        — |
+| PBM duplicate  | Pair below 0.95                               |    29 |        2 |
+| PBM duplicate  | First names disagree                          |     — |        5 |
+| PBM duplicate  | Same likely legacy candidate, pair below 0.50 |     2 |       21 |
 
 Results (`gold.identity_match_quality`, 2,991 cardholders who are members, duplicates included):
 
@@ -444,13 +472,21 @@ the guard sends them to review, at the cost of 10 true matches whose first names
 
 | Method              | Merged correctly | Merged wrongly | Not merged | In review | Precision | Recall  |
 |---------------------|-----------------:|---------------:|-----------:|----------:|----------:|--------:|
-| Splink              |               80 |              0 |         14 |        42 |   100.00% |  85.11% |
+| Splink              |               62 |              0 |         32 |        59 |   100.00% |  65.96% |
 | Splink after review |               93 |              0 |          1 |          0 |   100.00% |  98.94% |
 
-The model scored 122 pairs from 0.50: it merged 80 and sent 42 to review, of which 13 were the
-same person and 29 were not (18 below 0.95, 9 whose first names disagree completely and 2 whose
-strong legacy candidates are different members). The 3,269 cardholders resolve to 3,176 persons:
-one true pair has no score from 0.50, never reaches review and stays apart.
+The model proposed 121 pairs: it merged 62 and sent 59 to review, of which 31 were the same
+person and 28 were not (2 below 0.95, 5 whose first names disagree completely and 21 that share a
+likely legacy candidate). The 3,269 cardholders resolve to 3,176 persons: one true pair has no
+score from 0.50 and no shared likely candidate, never reaches review and stays apart.
+
+With m trained on the duplicates alone, the model merged 80 pairs by itself and sent 42 to review,
+with the same 93 after review; the m from the linkage merges fewer pairs on its own, all correctly,
+with every parameter estimated from data. The new review rule came from a test: regenerating the
+decisions for the new model, the simulated reviewer confirmed two links of duplicate cardholder
+IDs to their member while their pair scored 0.31, below review, and
+`assert_member_linked_to_one_person` failed (one member, two PBM persons). Those two pairs now
+reach review as sharing a likely candidate.
 
 **Effect on the FHIR data.** Of the 5,275 PBM claims, 4,717 are exported as ExplanationOfBenefit
 resources (Pharmacy profile) for linked members with coverage on the fill date; 43 claims of
@@ -478,7 +514,7 @@ v2.0.0.
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
 | Silver |     14 |              100% |              100% |     119 |               100% |              37.0% |
-| Gold   |     35 |              100% |              100% |     297 |               100% |              22.9% |
+| Gold   |     35 |              100% |              100% |     298 |               100% |              22.8% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
@@ -501,7 +537,9 @@ The data generators and the gold models are pinned, so the results do not depend
   date (`REFERENCE_DATE`, default `20260928`, Synthea's `-r` option) and a fixed end date
   (`END_DATE`, `-e`, default the reference date). Without `-e`, Synthea simulates up to the moment
   it runs, so a run on a later day adds encounters and observations. All are variables at the top
-  of the script; changing the version also requires changing `SYNTHEA_SHA256`.
+  of the script; changing the version also requires changing `SYNTHEA_SHA256`. Synthea also
+  exports the organizations, locations, practitioners and practitioner roles its records
+  reference (`scripts/synthea.properties`); turning that on left every other file unchanged.
 - **PBM feed.** `scripts/generate_pbm_feed.py` reads the legacy members in a fixed order and uses
   its own random generator (seed 42 + 2) and the same reference date, so repeated runs write
   byte-identical files.
@@ -510,6 +548,8 @@ The data generators and the gold models are pinned, so the results do not depend
   a versioned seed; `make review` dates them on the reference date, so the same data writes the
   same seed (started from an empty seed, it wrote the committed one byte for byte), and with the
   committed seed it finds an empty queue.
+- **CI runner.** The workflow runs on `ubuntu-24.04`, not `ubuntu-latest`, which moves to a new
+  release on its own.
 - **Code systems.** The ICD-10-CM releases are pinned by URL and SHA-256. The FDA publishes only
   the current NDC Directory, so the NDC check uses the directory of the day it was downloaded
   (cached in `data/terminology/`; CI downloads it again each week); its date and SHA-256 are in
