@@ -1,7 +1,8 @@
 # Runs the Quickstart end to end on synthetic data and fails if any gate fails:
-# dbt build (models and data tests), the SQL on FHIR v2 test suite (shareable
-# tests) and the HL7 FHIR validator on a sample of the legacy-derived resources
-# against the CARIN Blue Button 2.1.0 profiles (no terminology server).
+# the replication slot drill (monitoring alerts and recovery), dbt build (models
+# and data tests), the SQL on FHIR v2 test suite (shareable tests) and the HL7
+# FHIR validator on a sample of the legacy-derived resources against the CARIN
+# Blue Button 2.1.0 profiles (no terminology server).
 name: CI
 
 on:
@@ -66,6 +67,12 @@ jobs:
       - name: Ingest into bronze
         run: make ingest
 
+      # Pushes the CDC slot past its WAL cap and checks the alert, the loss and the
+      # recovery (a new snapshot of the same data). Before dbt, so gold.cdc_slot_lag
+      # records the loss and its warning test fires.
+      - name: Replication slot drill
+        run: make slot-drill
+
       - name: dbt build
         run: make dbt
 
@@ -83,6 +90,7 @@ jobs:
           if-no-files-found: ignore
           path: |
             data/sof_conformance.json
+            data/slot_drill.json
             data/fhir_validation_carin-bb/summary.json
             data/fhir_validation_carin-bb/validator.log
             dbt/target/run_results.json

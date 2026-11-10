@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes views conformance dbt coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt coverage fhir-validate fhir-validate-carin docs airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
@@ -28,6 +28,12 @@ ingest:    ## Snapshot (first run) or sync legacy changes via CDC, and load FHIR
 
 cdc:       ## Stream legacy changes into bronze continuously (Ctrl+C to stop)
 	$(PY) ingestion/cdc_legacy.py sync --follow --interval 5
+
+slot-check: ## Check replication slot lag (fails above 512 MB of retained WAL, or if the slot is at risk or lost)
+	$(PY) ingestion/cdc_legacy.py slot-status
+
+slot-drill: ## Prove the slot monitoring: push the slot past its WAL cap, check the alerts and the recovery
+	$(PY) scripts/slot_drill.py
 
 changes:   ## Simulate activity in the legacy database (300 events over 60 seconds)
 	$(PY) legacy_db/seed/simulate_changes.py --events 300 --duration 60

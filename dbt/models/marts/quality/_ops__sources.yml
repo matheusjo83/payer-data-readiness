@@ -7,3 +7,9 @@ sources:
     tables:
       - name: load_log
         identifier: _load_log
+      - name: cdc_slot_status
+        identifier: _cdc_slot_status
+        description: >
+          State of the CDC replication slot, recorded by the loader before each
+          sync (action = sync) and when it finds the slot lost and takes a new
+          snapshot (action = resnapshot). Append-only.

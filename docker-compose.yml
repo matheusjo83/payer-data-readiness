@@ -13,6 +13,11 @@ services:
       - max_replication_slots=4
       - -c
       - output_plugin_libraries=pgoutput,test_decoding,wal2json
+      # Cap the WAL a replication slot can hold. Past it, Postgres invalidates
+      # the slot (the CDC loader then takes a new snapshot) instead of filling
+      # the disk; `make slot-check` alerts at half of it.
+      - -c
+      - max_slot_wal_keep_size=1GB
     environment:
       POSTGRES_DB: payer_legacy
       POSTGRES_USER: legacy

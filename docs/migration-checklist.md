@@ -53,8 +53,10 @@ platform.
   metrics can only be computed from what was logged.
   *In this repo:* `bronze._load_log` and `gold.load_reliability`.
 - [ ] **Monitor replication lag and retained log.** A slot that nobody consumes keeps growing on
-  the source database.
-  **Not covered here** beyond the documented `drop-slot` command.
+  the source database. Cap the retained log, alert from outside the loader (the lag grows when the
+  loader is down), and decide what happens when the cap is hit.
+  *In this repo:* `max_slot_wal_keep_size`, `make slot-check` in its own DAG, `gold.cdc_slot_lag`,
+  a new snapshot when the slot is lost, and `make slot-drill` to prove it.
 
 ## 3. Reconcile continuously
 

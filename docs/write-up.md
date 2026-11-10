@@ -66,7 +66,7 @@ work he did himself. Work done by Claude Code is attributed to it.
 - **Legacy data as FHIR, checked two ways.** The legacy data becomes 5,000 Patient, 5,000 Coverage,
   24,507 ExplanationOfBenefit and 301 Organization resources. Round trips through FHIR reproduce the
   source tables with zero differing rows, and the HL7 validator reports zero errors on a
-  1,400-resource sample against the CARIN Blue Button 2.1.0 profiles, with references resolved
+  1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, with references resolved
   (terminology not checked). Before remediation, every sampled resource failed those profiles.
 - **Identity resolution with ground truth.** A PBM feed sends 2,900 of the members under its own
   IDs, with nicknames, typos, changed names, mistyped birth dates and old addresses, plus 275 people
@@ -224,7 +224,8 @@ model computes the metric correctly. They say nothing about how any organization
 ## Orchestration: Airflow orchestrates, it doesn't compute
 
 Airflow 3 runs two DAGs in Docker: a CDC refresh every 30 minutes (`cdc_sync` → `dbt_build`) and a
-manual full refresh that also loads FHIR, checks the ViewDefinitions and reports coverage. Three
+manual full refresh that also loads FHIR, checks the ViewDefinitions and reports coverage. (A third
+DAG, added after Phase 7, monitors the replication slot; see the limitations below.) Three
 decisions shaped it:
 
 - **Same commands as `make`.** Tasks call the same scripts and `dbt build` through `BashOperator`.
@@ -350,7 +351,7 @@ validating resources one by one had hidden: the Organizations had no `meta.lastU
 the synthetic NPIs had an invalid check digit, and the payer referenced by every claim failed its
 profile, which the validator reported on each claim and coverage that pointed to it. After Claude
 Code fixed them, the validator reports zero errors on 1,400 sampled resources: 200 per resource type
-and per ExplanationOfBenefit profile.
+and per ExplanationOfBenefit profile (1,600 since Phase 7 added a sample of the PBM pharmacy claims).
 
 Checking that the checks could fail found two gaps in the tooling itself. First, the validator does
 not report a reference it cannot resolve inside a Bundle: a Bundle with the provider removed
@@ -427,8 +428,12 @@ published scores should not depend on the thread scheduler, so the model runs on
 - **Scale and concurrency.** DuckDB's single writer shapes the orchestration. At scale, the next step
   would be to move to a table format with concurrent writers, such as Iceberg or Delta, and materialize the CDC
   current state incrementally instead of rebuilding it with a window function over all changes.
-- **Operations.** A replication slot keeps the database log until it is consumed. The project
-  documents how to drop the slot, but production needs monitoring and alerts on slot lag.
+- **Operations.** A replication slot keeps the database log until it is consumed. The legacy
+  database caps that retention at 1 GB, a check outside the loader alerts at 512 MB every 5
+  minutes, and a drill in CI proves the alert, the loss of the slot past the cap and the recovery
+  by a new snapshot. In production the alert would page someone instead of failing an Airflow run,
+  the cap would be sized from disk and expected downtime, and a new snapshot of large tables would
+  need planning, since it replaces the change history.
 - **Reproducibility.** Both generators are pinned: the legacy generator anchors its dates to a
   reference date (`--as-of`) instead of the day it runs, and the Synthea script downloads a fixed
   release (v4.0.0, checked by SHA-256) and runs it with fixed seeds, a fixed reference date and a

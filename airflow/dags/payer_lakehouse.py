@@ -1,11 +1,14 @@
 """Orchestration of the payer lakehouse pipeline.
 
 legacy_cdc_refresh      every 30 minutes: apply legacy changes (CDC), rebuild silver/gold
-lakehouse_full_refresh  on demand: CDC, FHIR load, ViewDefinition check, rebuild, coverage report
+lakehouse_full_refresh  on demand: CDC, FHIR and PBM loads, ViewDefinition check, rebuild, coverage report
+cdc_slot_monitor        every 5 minutes: check replication slot lag (fails = alert)
 
 Every task that writes the DuckDB lakehouse runs in the `lakehouse` pool (1 slot),
 because DuckDB allows a single writer: tasks from both DAGs queue instead of
-failing on a locked file.
+failing on a locked file. The slot monitor reads only Postgres, so it runs
+outside that pool and keeps alerting when the lakehouse is stuck, which is
+when the slot lag grows.
 """
 
 from datetime import datetime, timedelta
@@ -69,3 +72,17 @@ with DAG(
         cwd=PROJECT,
     )
     cdc_sync() >> load_fhir >> load_pbm >> views_check >> dbt_build() >> coverage
+
+
+with DAG(
+    dag_id="cdc_slot_monitor",
+    description="Check replication slot lag on the legacy database; a failed run is the alert",
+    schedule=timedelta(minutes=5),
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    max_active_runs=1,
+    # No retries: a failure should show at once, and the next run is 5 minutes away.
+    default_args={"owner": "data-platform", "retries": 0},
+    tags=["payer", "cdc", "monitoring"],
+):
+    BashOperator(task_id="slot_check", bash_command=f"{PY} ingestion/cdc_legacy.py slot-status", cwd=PROJECT)
