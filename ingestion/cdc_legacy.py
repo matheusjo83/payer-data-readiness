@@ -10,7 +10,7 @@ with the wal2json plugin:
    leaves the same final state.
 2. Sync: read new changes from the slot and append them to the bronze change
    tables (one per legacy table, append-only). The slot is only advanced
-   after DuckDB has committed the batch, so a crash never loses changes, and
+   after the lakehouse has committed the batch, so a crash never loses changes, and
    the last applied commit LSN is stored in bronze._cdc_state so a batch is
    never applied twice.
 
@@ -79,9 +79,10 @@ def bronze_table(table: str) -> str:
 
 
 def ensure_state_table(con) -> None:
+    # One row per slot, replaced by DELETE and INSERT (DuckLake has no constraints).
     con.execute("""
         CREATE TABLE IF NOT EXISTS bronze._cdc_state (
-            slot_name        VARCHAR PRIMARY KEY,
+            slot_name        VARCHAR,
             snapshot_lsn     BIGINT,
             last_commit_lsn  BIGINT,
             updated_at       TIMESTAMPTZ
@@ -251,7 +252,7 @@ def peek_changes(pg, after_lsn: int):
 
 
 def apply_changes(con, changes, commit_lsn: str, run_id: str) -> None:
-    """Append a batch of changes to the bronze change tables in one DuckDB transaction.
+    """Append a batch of changes to the bronze change tables in one lakehouse transaction.
 
     The commit LSN of the batch is stored in the same transaction, so either
     both the changes and the new watermark are saved, or neither is.
@@ -345,7 +346,8 @@ def sync_once(pg) -> int:
         if advance_to is None:
             break
         if changes:
-            # Open DuckDB only while writing, so dbt can use the file between polls.
+            # The lakehouse is opened per batch: a long-lived connection would pin an
+            # old snapshot of the catalog between polls.
             con = connect()
             try:
                 apply_changes(con, changes, advance_to, new_run_id())
@@ -388,14 +390,16 @@ def sync(follow: bool, interval: float) -> None:
         while True:
             try:
                 # Checked on every poll: in follow mode the slot can be lost
-                # while the loader runs (e.g. a long stall on a locked lakehouse).
+                # while the loader runs (e.g. a long stall writing to the lakehouse).
                 ensure_usable_slot(pg)
                 n = sync_once(pg)
                 if n or not follow:
                     print(f"Applied {n} changes.")
-            except duckdb.IOException as exc:
-                # The lakehouse file is locked (e.g. dbt is running). Nothing was
-                # committed and the slot was not advanced; retry on the next poll.
+            except (duckdb.IOException, duckdb.TransactionException) as exc:
+                # The lakehouse could not be reached or the commit conflicted with
+                # another writer (DuckLake rejects one of two writes to the same
+                # table at the same moment). Nothing was committed and the slot
+                # was not advanced; retry on the next poll.
                 if not follow:
                     raise
                 print(f"Lakehouse busy, retrying in {interval}s: {exc}")

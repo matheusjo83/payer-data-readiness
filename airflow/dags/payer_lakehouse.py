@@ -5,11 +5,12 @@ lakehouse_full_refresh  on demand: CDC, FHIR, PBM and terminology loads, ViewDef
                         coverage report
 cdc_slot_monitor        every 5 minutes: check replication slot lag (fails = alert)
 
-Every task that writes the DuckDB lakehouse runs in the `lakehouse` pool (1 slot),
-because DuckDB allows a single writer: tasks from both DAGs queue instead of
-failing on a locked file. The slot monitor reads only Postgres, so it runs
-outside that pool and keeps alerting when the lakehouse is stuck, which is
-when the slot lag grows.
+The lakehouse is DuckLake (a Postgres catalog, Parquet data), which takes
+several writers at once, so the loaders run whenever their DAG reaches them.
+Only dbt_build runs in the `lakehouse` pool (1 slot): two builds would rewrite
+the same tables, and DuckLake would reject one of them, so the builds of both
+refresh DAGs queue instead. The slot monitor reads only Postgres and keeps
+alerting when the lakehouse is stuck, which is when the slot lag grows.
 """
 
 from datetime import datetime, timedelta
@@ -25,7 +26,6 @@ default_args = {
     "owner": "data-platform",
     "retries": 2,
     "retry_delay": timedelta(minutes=1),
-    "pool": "lakehouse",
 }
 
 
@@ -35,7 +35,8 @@ def cdc_sync() -> BashOperator:
 
 def dbt_build() -> BashOperator:
     # Tests with severity warn (known legacy issues) do not fail the task; errors do.
-    return BashOperator(task_id="dbt_build", bash_command=f"{DBT} build --profiles-dir .", cwd=f"{PROJECT}/dbt")
+    return BashOperator(task_id="dbt_build", bash_command=f"{DBT} build --profiles-dir .", cwd=f"{PROJECT}/dbt",
+                        pool="lakehouse")
 
 
 with DAG(
@@ -68,9 +69,7 @@ with DAG(
         task_id="load_terminology", bash_command=f"{PY} ingestion/load_terminology.py", cwd=PROJECT
     )
     # Fails when a ViewDefinition changed but its dbt macro was not regenerated (make views).
-    views_check = BashOperator(
-        task_id="views_check", bash_command=f"{PY} fhir/build_views.py --check", cwd=PROJECT, pool="default_pool"
-    )
+    views_check = BashOperator(task_id="views_check", bash_command=f"{PY} fhir/build_views.py --check", cwd=PROJECT)
     coverage = BashOperator(
         task_id="dbt_coverage",
         bash_command=f"cd dbt && {DBT} docs generate --profiles-dir . && cd .. && {PY} scripts/dbt_coverage.py",

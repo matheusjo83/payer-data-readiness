@@ -65,12 +65,14 @@ def model(dbt, session):
 
     con = duckdb.connect(config={"threads": 1})
     con.register("people", people)
-    # The PBM twice: once as a side of the linkage, once on its own for the dedupe
+    # Sorted by ID, as in identity_matches_splink: the random samples depend on the
+    # row order. The PBM twice: once as a side of the linkage, once on its own for the dedupe
     # (Splink needs a distinct table per registered input).
     for name, source in (("legacy_people", "legacy"), ("pbm_link_people", "pbm"), ("pbm_people", "pbm")):
         con.execute(f"""
             CREATE TABLE {name} AS
             SELECT * EXCLUDE (source_dataset) FROM people WHERE source_dataset = '{source}'
+            ORDER BY unique_id
         """)
     db_api = DuckDBAPI(connection=con)
 

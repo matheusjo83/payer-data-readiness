@@ -6,8 +6,12 @@
   bulk WAL record, by their position in the transaction (_seq).
   Returns a parenthesized subquery with the source columns plus the
   _op/_lsn/_seq/_commit_ts/_loaded_at/_run_id metadata of the latest version.
+  up_to_lsn (a SQL expression) limits it to the changes up to that log position.
+  The silver models read the incremental current state (cdc_current_state);
+  this full rebuild is what the test assert_cdc_current_state_matches_full
+  compares it with.
 #}
-{% macro legacy_current_state(table_name, primary_key) -%}
+{% macro legacy_current_state(table_name, primary_key, up_to_lsn=none) -%}
 {%- set changes = source('legacy', table_name) -%}
 (
     select * exclude (_cdc_rn)
@@ -20,7 +24,11 @@
             ) as _cdc_rn
         from {{ changes }}
         where _op <> 'T'
-          and _lsn > coalesce((select max(_lsn) from {{ changes }} where _op = 'T'), -1)
+          and _lsn > coalesce((select max(_lsn) from {{ changes }} where _op = 'T'
+                               {%- if up_to_lsn is not none %} and _lsn <= {{ up_to_lsn }}{% endif %}), -1)
+          {%- if up_to_lsn is not none %}
+          and _lsn <= {{ up_to_lsn }}
+          {%- endif %}
     )
     where _cdc_rn = 1
       and _op <> 'D'

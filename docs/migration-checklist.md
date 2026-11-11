@@ -39,10 +39,16 @@ platform.
 - [ ] **Release source changes only after the target commits.** Read, write in one transaction
   together with the position you reached, and only then acknowledge. Store that position in the
   target so a crash between the two steps never applies a batch twice.
-  *In this repo:* `peek` → DuckDB transaction with `bronze._cdc_state` → `pg_replication_slot_advance`.
+  *In this repo:* `peek` → lakehouse transaction with `bronze._cdc_state` → `pg_replication_slot_advance`.
 - [ ] **Keep raw changes append-only and derive current state.** An append-only change log keeps
   history and lets you rebuild state after a bug; overwriting in place does not.
-  *In this repo:* `bronze.legacy_<table>_changes` and the `legacy_current_state` macro.
+  *In this repo:* `bronze.legacy_<table>_changes`, and the incremental `silver.cdc_current__<table>`.
+- [ ] **Maintain the current state incrementally, and prove it equals a full rebuild.** Apply only
+  the changes past a watermark, keep deletes as tombstones so the watermark stays exact, rebuild
+  when the history no longer continues (a truncate, a new snapshot), and compare the result with a
+  full rebuild up to the same watermark and with the source.
+  *In this repo:* macro `cdc_current_state`, `assert_cdc_current_state_matches_full`,
+  `scripts/cdc_reconcile.py`, `make cdc-check` in CI.
 - [ ] **Handle truncates, deletes and bulk writes.** Test a full reload (`TRUNCATE` + `COPY`), not
   only single-row changes. Bulk writes can share one log position across many rows.
   *In this repo:* `_op = 'T'` handling and the `_seq` tie-breaker.
@@ -113,10 +119,12 @@ platform.
 - [ ] **Isolate pipeline dependencies from the orchestrator's.**
   *In this repo:* a separate virtualenv in `airflow/Dockerfile`.
 - [ ] **Encode engine constraints in the scheduler.** If the storage allows a single writer, make
-  writers queue (for example, with a one-slot pool) instead of failing.
-  *In this repo:* the `lakehouse` pool.
+  writers queue (for example, with a one-slot pool) instead of failing; if it allows several,
+  queue only the jobs that rewrite the same tables.
+  *In this repo:* the `lakehouse` pool, now only for `dbt_build` (DuckLake takes several writers).
 - [ ] **Pin versions that share state.** Components that read and write the same files must agree
-  on formats.
+  on formats, and sort any input whose order a computation depends on: a lakehouse table has no
+  fixed row order.
   *In this repo:* `requirements.txt`.
 - [ ] **Define the failure policy.** Retries, which test severities fail a run, and who is alerted.
   *In this repo:* two retries per task, warnings do not fail `dbt_build`. Alerting is

@@ -3,16 +3,14 @@
 import time
 import uuid
 from contextlib import contextmanager
-from pathlib import Path
 
 import duckdb
 
-LAKEHOUSE_PATH = Path("data/lakehouse.duckdb")
+import lakehouse
 
 
 def connect() -> duckdb.DuckDBPyConnection:
-    LAKEHOUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(LAKEHOUSE_PATH))
+    con = lakehouse.connect()
     con.execute("CREATE SCHEMA IF NOT EXISTS bronze")
     con.execute("""
         CREATE TABLE IF NOT EXISTS bronze._load_log (

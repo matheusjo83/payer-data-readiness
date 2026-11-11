@@ -1,5 +1,5 @@
-# Pinned: the host and the Airflow container write the same DuckDB file,
-# so they must use the same DuckDB version.
+# Pinned: the host and the Airflow container write the same DuckLake lakehouse,
+# so they must use the same DuckDB version (and with it the same DuckLake extension).
 duckdb==1.5.6
 dbt-core==1.12.5
 dbt-duckdb==1.11.0

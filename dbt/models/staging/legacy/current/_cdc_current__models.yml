@@ -1,0 +1,346 @@
+version: 2
+
+# Incremental current state of each legacy table (macro cdc_current_state).
+
+models:
+  - name: cdc_current__pln
+    description: >
+      Current state of the legacy plans (pln), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [pln_id]
+    columns:
+      - name: pln_id
+        description: 'Plan ID.'
+        data_tests: [not_null]
+      - name: pln_nm
+        description: 'Plan name.'
+      - name: lob_cd
+        description: 'Line of business: COM, MCR (Medicare Advantage), MCD (Medicaid), CHP.'
+      - name: eff_dt
+        description: 'Effective date, VARCHAR ''YYYYMMDD''.'
+      - name: term_dt
+        description: 'Termination date, VARCHAR ''YYYYMMDD'' (''99991231'' = open-ended).'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__mbr_mstr
+    description: >
+      Current state of the legacy member master (mbr_mstr), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [mbr_sk]
+    columns:
+      - name: mbr_sk
+        description: 'Surrogate key of the member row (the source has duplicate member IDs).'
+        data_tests: [not_null]
+      - name: mbr_id
+        description: 'Legacy member ID.'
+      - name: fst_nm
+        description: 'First name.'
+      - name: lst_nm
+        description: 'Last name.'
+      - name: dob
+        description: 'Birth date, VARCHAR ''YYYYMMDD'' (some invalid).'
+      - name: gndr_cd
+        description: 'Gender code: M, F, U (and some invalid values).'
+      - name: zip_cd
+        description: 'ZIP code.'
+      - name: st_cd
+        description: 'State code.'
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__elig_span
+    description: >
+      Current state of the legacy eligibility spans (elig_span), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [elig_sk]
+    columns:
+      - name: elig_sk
+        description: 'Surrogate key of the eligibility span.'
+        data_tests: [not_null]
+      - name: mbr_id
+        description: 'Legacy member ID.'
+      - name: pln_id
+        description: 'Plan ID.'
+      - name: eff_dt
+        description: 'Effective date, VARCHAR ''YYYYMMDD''.'
+      - name: term_dt
+        description: 'Termination date, VARCHAR ''YYYYMMDD'' (''99991231'' = open-ended).'
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__prv
+    description: >
+      Current state of the legacy providers (prv), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [prv_id]
+    columns:
+      - name: prv_id
+        description: 'Provider ID.'
+        data_tests: [not_null]
+      - name: npi
+        description: 'National Provider Identifier.'
+      - name: prv_nm
+        description: 'Provider name.'
+      - name: spclty_cd
+        description: 'Specialty code.'
+      - name: st_cd
+        description: 'State code.'
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__clm_hdr
+    description: >
+      Current state of the legacy claim headers (clm_hdr), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [clm_id]
+    columns:
+      - name: clm_id
+        description: 'Claim ID.'
+        data_tests: [not_null]
+      - name: mbr_id
+        description: 'Legacy member ID.'
+      - name: prv_id
+        description: 'Provider ID.'
+      - name: clm_typ_cd
+        description: 'Claim type: P professional, I institutional, R pharmacy.'
+      - name: svc_from_dt
+        description: 'First service date, VARCHAR ''YYYYMMDD''.'
+      - name: svc_to_dt
+        description: 'Last service date, VARCHAR ''YYYYMMDD''.'
+      - name: rcvd_dt
+        description: 'Received date, VARCHAR ''YYYYMMDD''.'
+      - name: adj_dt
+        description: 'Adjudication date, VARCHAR ''YYYYMMDD'' (empty while pending).'
+      - name: clm_stat_cd
+        description: 'Claim status: PD paid, DN denied, PN pending, VD void.'
+      - name: tot_chrg_amt
+        description: 'Total charged amount.'
+      - name: tot_pd_amt
+        description: 'Total paid amount.'
+      - name: ntwk_cd
+        description: 'Network status: I in network, O out of network.'
+      - name: bill_typ_cd
+        description: 'Institutional type of bill (0111 inpatient, 0131 outpatient).'
+      - name: pos_cd
+        description: 'Professional: CMS place of service code.'
+      - name: days_sply
+        description: 'Pharmacy: days supply.'
+      - name: daw_cd
+        description: 'Pharmacy: NCPDP dispense as written code.'
+      - name: rfl_nbr
+        description: 'Pharmacy: refill number (0 = original fill).'
+      - name: rfl_auth
+        description: 'Pharmacy: refills authorized.'
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__clm_ln
+    description: >
+      Current state of the legacy claim lines (clm_ln), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [clm_id, ln_nbr]
+    columns:
+      - name: clm_id
+        description: 'Claim ID.'
+        data_tests: [not_null]
+      - name: ln_nbr
+        description: 'Line number within the claim.'
+        data_tests: [not_null]
+      - name: proc_cd
+        description: 'Procedure code (CPT); empty on pharmacy lines.'
+      - name: dx_cd
+        description: 'Diagnosis code (ICD-10-CM).'
+      - name: units
+        description: 'Units.'
+      - name: chrg_amt
+        description: 'Charged amount of the line.'
+      - name: pd_amt
+        description: 'Paid amount of the line.'
+      - name: ndc_cd
+        description: 'Pharmacy: NDC.'
+      - name: rev_cd
+        description: 'Institutional: NUBC revenue code.'
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__pa_req
+    description: >
+      Current state of the legacy prior authorization requests (pa_req), maintained incrementally from its CDC change
+      table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [pa_id]
+    columns:
+      - name: pa_id
+        description: 'Prior authorization ID.'
+        data_tests: [not_null]
+      - name: mbr_id
+        description: 'Legacy member ID.'
+      - name: prv_id
+        description: 'Provider ID.'
+      - name: svc_cd
+        description: 'Requested service code (CPT).'
+      - name: urgnt_flg
+        description: 'Y expedited, N standard.'
+      - name: req_ts
+        description: 'Request time.'
+      - name: dcsn_ts
+        description: 'Decision time; null while pending.'
+      - name: dcsn_cd
+        description: 'Decision: A approved, D denied, P pending.'
+      - name: req_amt
+        description: 'Estimated cost of the requested service.'
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'

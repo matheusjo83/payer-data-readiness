@@ -61,7 +61,9 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   HAPI FHIR server loaded from gold, prior authorizations as Da Vinci PDex ExplanationOfBenefit
   resources (STU 2.1.0, without PAS), and, when the prior authorization data fell short of the
   profile, to fix the legacy generator (requests inside the member's coverage, a requested
-  amount) and to code denials with X12's A3, which no open source could confirm.
+  amount) and to code denials with X12's A3, which no open source could confirm. For the
+  storage, Matheus chose DuckLake (a Postgres catalog with Parquet data) and an incremental CDC
+  current state merged by key from an `_lsn` watermark, with deletes applied.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -83,11 +85,15 @@ PBM files (pipe-delimited) ──── file load ─────┘            
           └─── orchestrated by Airflow (CDC sync, slot monitor, FHIR and PBM loads, dbt, coverage) ───┘
 ```
 
-| Layer  | Location (DuckDB)         | Contents                                                 |
+| Layer  | Location (DuckLake)       | Contents                                                 |
 |--------|---------------------------|----------------------------------------------------------|
 | Bronze | `bronze.*`                | Legacy change tables (CDC), raw FHIR JSON, PBM files, load log |
-| Silver | `silver.*` (dbt staging)  | Current state of each source: deduplicated, typed, tested |
+| Silver | `silver.*` (dbt staging)  | Current state of each source (incremental for the legacy tables): deduplicated, typed, tested |
 | Gold   | `gold.*` (dbt marts)      | Dimensions, facts, identity cross-reference, quality scorecard, reliability metrics, FHIR resources |
+
+The lakehouse is [DuckLake](https://ducklake.select/): its catalog is a Postgres database and its
+data is Parquet files in `data/lakehouse/`, so several processes can write at once. It is not
+Iceberg or Delta Lake (see [docs/architecture.md](docs/architecture.md#the-lakehouse-ducklake)).
 
 How each component works (change data capture, orchestration, SQL on FHIR, the legacy-to-FHIR
 mapping, identity resolution) is described in [docs/architecture.md](docs/architecture.md).
@@ -95,7 +101,8 @@ mapping, identity resolution) is described in [docs/architecture.md](docs/archit
 ## Stack
 
 Runs fully local, at zero cost: **Postgres** (legacy source, Docker, with the **wal2json** logical
-decoding plugin for CDC), **DuckDB** (lakehouse engine), **dbt** (transformations, tests, lineage),
+decoding plugin for CDC), **DuckDB** with **DuckLake** (lakehouse engine and format: a Postgres
+catalog, Parquet data), **dbt** (transformations, tests, lineage),
 **Synthea** (synthetic FHIR data), **Splink** (probabilistic record linkage), **Python** (ingestion),
 **Apache Airflow** (orchestration, Docker), **HAPI FHIR** (the FHIR API, Docker).
 
@@ -107,7 +114,7 @@ Requirements: Docker, Python 3.11+, Java 17+ (for Synthea), `make`.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-make up        # build and start the legacy Postgres database
+make up        # build and start the legacy Postgres database and the lakehouse catalog (Postgres)
 make seed      # generate legacy data with deliberate quality issues
 make pbm       # generate the PBM feed: the same members under other IDs, with known variations
 make synthea   # generate synthetic FHIR R4 data (bulk NDJSON)
@@ -155,16 +162,18 @@ make dbt       # after stopping `make cdc`: refresh silver/gold, including gold.
 stopped and checks the alert and the recovery. The recovery is a new snapshot, which replaces the
 CDC change history (and so `gold.cdc_latency`); run the drill before a `make cdc` demo, not after.
 
-DuckDB allows one writer at a time. The CDC loader opens the lakehouse only while it writes a
-batch and retries on the next poll if the file is busy, but `make dbt` can still fail if it starts
-in the middle of a write; stopping `make cdc` first avoids that.
+`make cdc` can keep running while `make dbt` builds: DuckLake takes several writers, and the dbt
+models of the legacy tables apply only the changes that arrived since their last build. `make
+cdc-check` exercises that path (simulated changes, a sync, the incremental build) and checks the
+result against a full rebuild and against Postgres.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up fhir-up seed pbm synthea ingest
-slot-drill dbt conformance fhir-validate-carin fhir-validate-pdex fhir-publish fhir-api-check` on a
-clean runner. The run fails if the slot drill fails, if a model or data test fails, if any
+slot-drill dbt conformance fhir-validate-carin fhir-validate-pdex fhir-publish fhir-api-check
+cdc-check` on a clean runner. The run fails if the slot drill fails, if a model or data test fails, if any
 shareable SQL on FHIR test fails, if the HL7 validator reports an error against the CARIN Blue
-Button or PDex profiles in the samples, or if a check of the FHIR server against gold fails.
+Button or PDex profiles in the samples, if a check of the FHIR server against gold fails, or if
+the incremental current state differs from a full rebuild or from Postgres.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -177,7 +186,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | Area                | Result                                                                                           |
 |---------------------|--------------------------------------------------------------------------------------------------|
 | Data quality        | 312 of 312 injected orphan claim lines and 242 of 242 claims with an unknown member detected      |
-| Change data capture | 640 streamed changes, median latency 2.16 s with 5-second polling; rebuilt state matched the source row for row |
+| Change data capture | 640 streamed changes, median latency 2.16 s with 5-second polling; rebuilt state matched the source row for row. On DuckLake, the incremental current state equals a full rebuild and Postgres after simulated changes, a new snapshot and a TRUNCATE, and the loader kept writing during a full dbt build (626 changes, median latency 0.42 s) |
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
 | Identity resolution | PBM cardholders linked to members with 100% precision and 97.9% recall against ground truth (deterministic baseline: 99.5% and 93.4%), 98.9% after the review queue was worked; 93 of 94 duplicate cardholder IDs within the PBM merged, none wrongly |
@@ -199,14 +208,14 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Identity – Review and deduplication:** reviewer decisions as a versioned seed with an audit trail, a simulated reviewer, and duplicate cardholders within the PBM merged by a second Splink model
 - [x] **Cleanup:** every CI, Synthea, Splink and validator warning traced to its cause and fixed, or counted apart when the data cannot remove it
 - [x] **FHIR API:** a HAPI FHIR server loaded from gold (search and Bulk `$export`), with prior authorization as PDex ExplanationOfBenefit
-- [ ] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
+- [x] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
 
 ## Project structure
 
 ```
 legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
 scripts/       Synthea download and configuration, PBM feed generator, simulated identity reviewer, dbt coverage report
-ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
+ingestion/     Lakehouse connection (DuckLake) and bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
 dbt/           Silver and gold models (including the Splink Python models), seeds (with the review decisions), tests, lineage
 airflow/       Airflow image and DAGs
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base, CARIN, PDex), FHIR server publish and API checks

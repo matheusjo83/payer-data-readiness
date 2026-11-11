@@ -25,9 +25,9 @@ import csv
 import sys
 from pathlib import Path
 
-import duckdb
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
+import lakehouse  # noqa: E402
 
-LAKEHOUSE = "data/lakehouse.duckdb"
 SEED = Path("dbt/seeds/identity_review_decisions.csv")
 COLUMNS = ["review_type", "cardholder_id", "candidate_id", "decision", "reviewer", "decided_at", "note"]
 REVIEWER = "simulated-reviewer"
@@ -37,7 +37,7 @@ DECIDED_AT = "2026-09-28"
 
 
 def main() -> None:
-    con = duckdb.connect(LAKEHOUSE, read_only=True)
+    con = lakehouse.connect(read_only=True)
     try:
         rows = con.execute("""
             with truth as (

@@ -33,6 +33,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # Lakehouse catalog: DuckLake keeps its metadata (schemas, tables, snapshots,
+  # the list of Parquet files) in this Postgres database; the data itself is
+  # Parquet under data/lakehouse/. Separate from the legacy source on purpose.
+  lakehouse-catalog:
+    image: postgres:16
+    container_name: payer-lakehouse-catalog
+    environment:
+      POSTGRES_DB: lakehouse
+      POSTGRES_USER: lakehouse
+      POSTGRES_PASSWORD: lakehouse
+    ports:
+      - "5434:5432"
+    volumes:
+      - lakehouse_catalog:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lakehouse -d lakehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   # FHIR API (make fhir-up): a HAPI FHIR R4 server that fhir/publish.py loads from
   # the gold FHIR models. Its database (H2) lives in the container, so recreating
   # the container (make fhir-up does) starts from an empty server. No request
@@ -76,6 +96,7 @@ services:
     depends_on:
       airflow-db: {condition: service_healthy}
       legacy-db: {condition: service_healthy}
+      lakehouse-catalog: {condition: service_healthy}
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
@@ -84,6 +105,7 @@ services:
       # Local development only: every user is an admin, no login screen.
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
       LEGACY_PG_DSN: host=legacy-db port=5432 dbname=payer_legacy user=legacy password=legacy
+      LAKEHOUSE_CATALOG: host=lakehouse-catalog port=5432 dbname=lakehouse user=lakehouse password=lakehouse
     volumes:
       - .:/opt/project
     ports:
@@ -93,9 +115,10 @@ services:
       - -c
       - >-
         airflow db migrate
-        && airflow pools set lakehouse 1 "DuckDB lakehouse: single writer"
+        && airflow pools set lakehouse 1 "dbt builds, one at a time"
         && exec airflow standalone
 
 volumes:
   legacy_data:
+  lakehouse_catalog:
   airflow_data:
