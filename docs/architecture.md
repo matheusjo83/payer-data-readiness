@@ -15,7 +15,7 @@ Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_pbm_cl
 `pbm_duplicate_pairs`, `pbm_persons`, `member_xref`, `identity_review_queue`,
 `identity_review_audit`, `identity_match_quality`, `identity_dedupe_quality`); the FHIR resources built from the
 legacy and PBM data (`fhir_patient`, `fhir_coverage`, `fhir_explanation_of_benefit`,
-`fhir_organization`); and the SQL on FHIR view outputs (`vd_synthea__*`, `vd_legacy__*`).
+`fhir_prior_authorization`, `fhir_organization`); and the SQL on FHIR view outputs (`vd_synthea__*`, `vd_legacy__*`).
 
 ## The simulated legacy source
 
@@ -136,6 +136,18 @@ guide CMS recommends for the Patient Access API. Each resource declares its prof
 Outpatient-Institutional or Pharmacy profile from its claim type and type of bill. The payer and the
 providers (clinics) are Organization resources that the other resources reference.
 
+Prior authorizations follow the [Da Vinci PDex](https://hl7.org/fhir/us/davinci-pdex/) Prior
+Authorization profile (STU 2.1.0; CMS lists 2.0.0 and 2.1.0 for the Patient Access API, the
+first as derived from expired standards). `fhir_prior_authorization` builds an
+ExplanationOfBenefit with `use = preauthorization` per legacy request: the requested CPT code as
+the item, the decision as a review action on its adjudication (X12 306: A1 approved, A3 denied, A4
+pending), the decision time as `base-ext-when-adjudicated`, the requested amount as the
+`submitted` adjudication PDex requires there, the urgency as `priority` (stat or normal) and
+`outcome` queued while pending. PDex points the Coverage to Da Vinci HRex and the other references
+to US Core, which adds two requirements the claims did not have: an identifier on the payer
+Organization, and a birth date on the Patient, so a birth date the legacy source has invalid is
+exported as a data-absent reason (`unknown`) instead of being left out.
+
 - **Narrative and plan type.** Every resource carries a generated narrative (`text`, macro
   `fhir_narrative`) built from its own data, and each Coverage the plan's Source of Payment
   Typology code (the Payer Type value set CARIN binds). An NPI is typed `NPI`, as CARIN requires,
@@ -165,6 +177,10 @@ providers (clinics) are Organization resources that the other resources referenc
   warnings the data cannot remove are counted apart as known warnings, each with its reason
   (`KNOWN_WARNINGS` in `fhir/validate.py`): the identifier types CARIN requires (`uc`, `MB`), which
   the base value set lacks, and tx.fhir.org's NDC, a 2021 snapshot that marks every code inactive.
+- **PDex validation.** `make fhir-validate-pdex` validates one sample per decision (approved,
+  denied, pending) against the PDex 2.1.0 package, in Bundles as above, so the Coverage is checked
+  against HRex and the Patient and Organizations against US Core. The X12 review action codes are
+  counted as unverified: X12 code lists are licensed.
 - **Terminology, on every resource.** The validator sees a sample. `ingestion/load_terminology.py`
   loads the public code lists into bronze: the CMS ICD-10-CM releases for FY2021 to FY2026 (pinned
   by SHA-256) and the FDA NDC Directory (only the current one exists; its date and SHA-256 are
@@ -173,6 +189,35 @@ providers (clinics) are Organization resources that the other resources referenc
   checks it on the service date: an ICD-10-CM code must be billable in that fiscal year's release,
   and an NDC listed and marketed. Licensed code systems (CPT, NUBC) and the NCPDP stub are
   reported as unverified. `assert_terminology_codes_valid` fails the build on an invalid code.
+
+## The FHIR API
+
+A HAPI FHIR server (`hapiproject/hapi:v8.12.0-2`, service `fhir-server`, profile `api` in
+`docker-compose.yml`) serves the gold resources at `http://localhost:8090/fhir`. Its H2 database
+lives inside the container, and `make fhir-up` recreates the container, so every load starts from
+an empty server and a resource removed from gold cannot linger. The server does not validate
+requests: the resources are validated before they are published.
+
+- **Publish.** `fhir/publish.py` (`make fhir-publish`) first loads the five search parameters that
+  CARIN Blue Button and PDex require of a server and base FHIR R4 lacks (ExplanationOfBenefit
+  `type`, `service-date`, `service-start-date`, `billable-period-start` and `use`, copied from
+  the two packages into `fhir/server/search_parameters/`), so the data is indexed with them. Then
+  it loads Organization, Patient, Coverage and ExplanationOfBenefit (claims, then prior
+  authorizations) from the gold models, in that order, as transactions of 500 PUTs by ID: a batch
+  loads completely or not at all, and a second run replaces instead of duplicating.
+- **Check.** `fhir/api_check.py` (`make fhir-api-check`) computes every expected figure from gold
+  and compares it with the server: the count of each resource type and of ExplanationOfBenefit by
+  `use` and `type`; the searches the CARIN and PDex capability statements require (by patient,
+  identifier, use, billable period), on a reproducible sample of members, claims and PBM cardholder
+  IDs; and a system-level Bulk `$export`, whose IDs must be exactly the gold IDs and whose
+  resources must equal gold apart from `meta`. Searches are sent with `Cache-Control: no-cache`,
+  because HAPI reuses the result of an identical search for a minute.
+- **What the server changes.** HAPI sets `meta.versionId` and replaces `meta.lastUpdated` with the
+  time it stored the resource. The legacy update time stays in gold. Since every publish loads
+  every resource, `_lastUpdated` on the server is the publish time; a production feed would publish
+  only the resources that changed.
+- **Orchestration.** Publishing is a `make` step, run in CI after the validations; the Airflow DAGs
+  do not publish, so after a refresh in Airflow the server is updated with `make fhir-publish`.
 
 ## The PBM feed and identity resolution
 

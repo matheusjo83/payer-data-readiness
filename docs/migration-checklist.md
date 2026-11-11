@@ -129,13 +129,17 @@ platform.
 - [ ] **Pick the target profiles early.** Know which implementation guide the API will follow (for
   payer data, often CARIN Blue Button, US Core and Da Vinci guides) and which elements it requires.
   *In this repo:* CARIN Blue Button STU 2.1.0 (the version CMS lists for the Patient Access API),
-  declared in each resource's `meta.profile`. Measuring the gap first showed which missing elements
-  were mapping work and which were data the legacy source did not have.
+  declared in each resource's `meta.profile`, and Da Vinci PDex STU 2.1.0 for the prior
+  authorizations. Measuring the gap first showed which missing elements were mapping work and
+  which were data the legacy source did not have. Follow the references too: PDex sends the
+  Coverage to Da Vinci HRex, which requires things CARIN did not (a payer identifier, a birth
+  date).
 - [ ] **Never map an invalid source value to a plausible one.** Omit it, or use a data-absent
   reason or the standard's own "unknown" value when the profile requires the element, and keep the
   quality flag in the analytics layer.
-  *In this repo:* invalid gender codes become `unknown` in `fhir_patient` (CARIN requires a gender)
-  and stay counted in `gold.dq_issue_summary`.
+  *In this repo:* invalid gender codes become `unknown` in `fhir_patient` (CARIN requires a gender),
+  and an invalid birth date becomes a data-absent reason (HRex requires a birth date); both stay
+  counted in `gold.dq_issue_summary`.
 - [ ] **Enforce FHIR JSON rules while building resources.** No null values, no empty arrays, valid
   date formats.
   *In this repo:* `json_merge_patch('{}', …)` in `dbt/models/marts/fhir/`.
@@ -211,8 +215,13 @@ platform.
   validator's terminology cache on each run, or the result depends on what earlier runs cached.
   Say which code systems stay unverified because they are licensed.
   *In this repo:* `make fhir-validate-carin` with tx.fhir.org, and `gold.terminology_code_check`
-  (CMS ICD-10-CM, FDA NDC, CMS place of service) with `assert_terminology_codes_valid`; CPT and
-  NUBC revenue codes are unverified.
+  (CMS ICD-10-CM, FDA NDC, CMS place of service) with `assert_terminology_codes_valid`; CPT, NUBC
+  revenue codes and the X12 review action codes are unverified.
+- [ ] **Serve the resources through a real FHIR server and check it against the source.** Count
+  each type, run the searches the implementation guides require of a server, and run a Bulk
+  export whose every resource must equal the source. Ask for fresh search results: a server may
+  reuse a cached one.
+  *In this repo:* `make fhir-up fhir-publish fhir-api-check` (HAPI FHIR, `fhir/api_check.py`).
 
 ## 10. Report results people can trust
 
@@ -231,5 +240,6 @@ platform.
   *In this repo:* all data is synthetic (Synthea and the legacy generator).
 - [ ] **Document lineage from source to consumption.**
   *In this repo:* dbt docs (`make docs`).
-- [ ] **Access control, audit logging, retention and consent.**
-  **Not covered here.**
+- [ ] **Access control, audit logging, retention and consent,** including SMART on FHIR
+  authorization on the API, so that each member reads only their own data.
+  **Not covered here** (the FHIR server has no authentication).

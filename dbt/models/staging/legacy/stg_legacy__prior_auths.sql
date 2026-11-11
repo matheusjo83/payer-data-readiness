@@ -10,5 +10,7 @@ select
         when 'A' then 'approved'
         when 'D' then 'denied'
         when 'P' then 'pending'
-    end                       as decision
+    end                       as decision,
+    req_amt::decimal(12, 2)   as requested_amount,
+    upd_ts                    as updated_at
 from {{ legacy_current_state('pa_req', ['pa_id']) }}

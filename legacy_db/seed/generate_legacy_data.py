@@ -207,19 +207,31 @@ def main() -> None:
         lines.append((f"C9{i:011d}", 1, random.choice(PROC_CODES), random.choice(DX_CODES),
                       1, 100.0, 0.0, None, None, now))
 
-    # Prior authorizations (decision time feeds the CMS-0057-F timeliness metric)
-    pas = []
+    # Prior authorizations (decision time feeds the CMS-0057-F timeliness metric).
+    # The main draws are unchanged. A request dated outside the member's coverage
+    # (the date and the member are drawn independently) moves to a day inside it,
+    # at the same time of day, and its decision keeps the same delay, so the
+    # timeliness figures do not change. That and the requested amount come from a
+    # separate random generator, so no other table changes either.
+    pa_rng = random.Random(args.seed + 4)
+    pas, pas_moved = [], 0
     for i in range(args.prior_auths):
         urgent = "Y" if random.random() < 0.2 else "N"
         req = now - timedelta(days=random.randint(1, 365), hours=random.randint(0, 23))
         if random.random() < 0.05:
-            dcsn_ts, dcsn = None, "P"
+            hours, dcsn = None, "P"
         else:
             hours = random.expovariate(1 / (30 if urgent == "Y" else 90))
-            dcsn_ts = req + timedelta(hours=hours)
             dcsn = random.choices(["A", "D"], [85, 15])[0]
-        pas.append((f"PA{i + 1:012d}", random.choice(member_ids), random.choice(provider_ids),
-                    random.choice(PROC_CODES), urgent, req, dcsn_ts, dcsn, now))
+        mid, prv, svc = random.choice(member_ids), random.choice(provider_ids), random.choice(PROC_CODES)
+        eff, term = coverage[mid]
+        last = min(term or today, today - timedelta(days=1))
+        if not eff <= req.date() <= last and eff <= last:
+            req = datetime.combine(eff + timedelta(days=pa_rng.randint(0, (last - eff).days)), req.time())
+            pas_moved += 1
+        dcsn_ts = None if hours is None else req + timedelta(hours=hours)
+        amount = round(pa_rng.uniform(40, 1500), 2)
+        pas.append((f"PA{i + 1:012d}", mid, prv, svc, urgent, req, dcsn_ts, dcsn, amount, now))
 
     with connect_with_retry(PG_DSN) as conn, conn.cursor() as cur:
         cur.execute("TRUNCATE pln, mbr_mstr, elig_span, prv, clm_hdr, clm_ln, pa_req RESTART IDENTITY")
@@ -234,12 +246,12 @@ def main() -> None:
         copy_rows(cur, "clm_ln", ["clm_id", "ln_nbr", "proc_cd", "dx_cd", "units",
                                   "chrg_amt", "pd_amt", *LINE_DETAIL_COLS, "upd_ts"], lines)
         copy_rows(cur, "pa_req", ["pa_id", "mbr_id", "prv_id", "svc_cd", "urgnt_flg",
-                                  "req_ts", "dcsn_ts", "dcsn_cd", "upd_ts"], pas)
+                                  "req_ts", "dcsn_ts", "dcsn_cd", "req_amt", "upd_ts"], pas)
         conn.commit()
 
     print(f"Loaded: {len(members)} member rows ({len(members) - len(member_ids)} duplicates), "
           f"{len(providers)} providers, {len(claims)} claims, {len(lines)} claim lines "
-          f"({n_orphans} orphans), {len(pas)} prior auths, as of {today}.")
+          f"({n_orphans} orphans), {len(pas)} prior auths ({pas_moved} moved into coverage), as of {today}.")
 
 
 if __name__ == "__main__":

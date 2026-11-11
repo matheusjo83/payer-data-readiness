@@ -1,4 +1,5 @@
--- Every reference in the legacy-derived FHIR resources must point to a resource
+-- Every reference in the legacy-derived FHIR resources (claims, prior
+-- authorizations, coverage) must point to a resource
 -- that is exported too. The HL7 validator does not report a reference it cannot
 -- resolve inside a Bundle as an error, so this is checked here, over all rows.
 with refs as (
@@ -13,6 +14,18 @@ with refs as (
     union all
     select 'ExplanationOfBenefit', id, resource->>'$.provider.reference'
     from {{ ref('fhir_explanation_of_benefit') }}
+    union all
+    select 'PriorAuthorization', id, resource->>'$.patient.reference'
+    from {{ ref('fhir_prior_authorization') }}
+    union all
+    select 'PriorAuthorization', id, resource->>'$.insurance[0].coverage.reference'
+    from {{ ref('fhir_prior_authorization') }}
+    union all
+    select 'PriorAuthorization', id, resource->>'$.insurer.reference'
+    from {{ ref('fhir_prior_authorization') }}
+    union all
+    select 'PriorAuthorization', id, resource->>'$.provider.reference'
+    from {{ ref('fhir_prior_authorization') }}
     union all
     select 'Coverage', id, resource->>'$.beneficiary.reference'
     from {{ ref('fhir_coverage') }}

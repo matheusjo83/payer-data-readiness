@@ -33,6 +33,20 @@ services:
       timeout: 5s
       retries: 10
 
+  # FHIR API (make fhir-up): a HAPI FHIR R4 server that fhir/publish.py loads from
+  # the gold FHIR models. Its database (H2) lives in the container, so recreating
+  # the container (make fhir-up does) starts from an empty server. No request
+  # validation: the resources are validated before they are published.
+  fhir-server:
+    profiles: [api]
+    image: hapiproject/hapi:v8.12.0-2
+    container_name: payer-fhir-server
+    environment:
+      hapi.fhir.fhir_version: R4
+      hapi.fhir.bulk_export_enabled: "true"
+    ports:
+      - "8090:8080"
+
   # Orchestration (optional): docker compose --profile airflow up -d
   airflow-db:
     profiles: [airflow]

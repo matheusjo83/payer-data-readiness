@@ -1,15 +1,15 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt review coverage fhir-validate fhir-validate-carin docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-up fhir-publish fhir-api-check docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
 	docker compose up -d --build legacy-db
 
-down:      ## Stop containers (including Airflow)
-	docker compose --profile airflow down
+down:      ## Stop containers (including Airflow and the FHIR server)
+	docker compose --profile airflow --profile api down
 
 reset:     ## Stop containers and delete all local data
-	docker compose --profile airflow down -v
+	docker compose --profile airflow --profile api down -v
 	rm -rf data/
 
 seed:      ## Generate synthetic legacy payer data (with deliberate quality issues)
@@ -70,6 +70,18 @@ fhir-validate: ## Validate a sample of the legacy-derived FHIR resources against
 
 fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0 profiles, with references resolved and codes checked by tx.fhir.org (Java)
 	$(PY) fhir/validate.py --ig carin-bb --top 60 --tx https://tx.fhir.org
+
+fhir-validate-pdex: ## Validate the prior authorizations (one sample per decision) against the Da Vinci PDex IG 2.1.0, codes checked by tx.fhir.org (Java)
+	$(PY) fhir/validate.py --ig pdex --top 60 --tx https://tx.fhir.org
+
+fhir-up:   ## Start the HAPI FHIR server empty (recreated each time), at http://localhost:8090/fhir
+	docker compose --profile api up -d --force-recreate fhir-server
+
+fhir-publish: ## Load the gold FHIR resources (and the CARIN/PDex search parameters) into the FHIR server
+	$(PY) fhir/publish.py
+
+fhir-api-check: ## Check the FHIR server against gold: counts, CARIN/PDex searches, Bulk $$export (writes data/fhir_api.json)
+	$(PY) fhir/api_check.py
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

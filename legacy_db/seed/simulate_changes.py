@@ -87,10 +87,12 @@ class Simulator:
         pa_id = f"PA{self.next_pa:012d}"
         self.next_pa += 1
         cur.execute(
-            "INSERT INTO pa_req (pa_id, mbr_id, prv_id, svc_cd, urgnt_flg, req_ts, dcsn_ts, dcsn_cd, upd_ts) "
-            "VALUES (%s, %s, %s, %s, %s, %s, NULL, 'P', %s)",
-            [pa_id, random.choice(self.member_ids), random.choice(self.provider_ids),
-             random.choice(PROC_CODES), "Y" if random.random() < 0.2 else "N", now, now],
+            "INSERT INTO pa_req (pa_id, mbr_id, prv_id, svc_cd, urgnt_flg, req_ts, dcsn_ts, dcsn_cd, req_amt, upd_ts) "
+            "VALUES (%s, %s, %s, %s, %s, %s, NULL, 'P', %s, %s)",
+            # Requests come from members with coverage today, as new claims do.
+            [pa_id, random.choice(list(self.active_coverage)), random.choice(self.provider_ids),
+             random.choice(PROC_CODES), "Y" if random.random() < 0.2 else "N", now,
+             round(random.uniform(40, 1500), 2), now],
         )
         return True
 

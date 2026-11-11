@@ -2,7 +2,9 @@
 -- Organization resources: the payer (EOB.insurer, Coverage.payor), the legacy
 -- providers, which are clinics, and the PBM's pharmacies (EOB.provider). The payer is defined by
 -- this project rather than the legacy source, so its lastUpdated is the
--- reference date (var as_of_date). Only NPIs with a valid check digit are exported.
+-- reference date (var as_of_date), and so is its identifier: Da Vinci HRex, which
+-- the PDex prior authorizations reference through the Coverage, requires an
+-- identifier on the payer organization. Only NPIs with a valid check digit are exported.
 -- An NPI is typed NPI, as CARIN requires, and also PRN (provider number), the
 -- code of the base FHIR IdentifierType value set (extensible) that fits it: that
 -- value set has no NPI code.
@@ -13,6 +15,9 @@ select
         'id', 'payer',
         'meta', {{ carin_meta('C4BB-Organization', as_of_date() ~ '::timestamp') }},
         'text', {{ fhir_narrative("'Payer Data Readiness (synthetic), the payer'") }},
+        'identifier', json_array(json_object(
+            'system', 'https://payer-data-readiness.example/payer-id',
+            'value', 'payer')),
         'active', true,
         'name', 'Payer Data Readiness (synthetic)'
     ) as resource

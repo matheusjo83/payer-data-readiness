@@ -38,6 +38,21 @@ models:
         description: The FHIR ExplanationOfBenefit resource as JSON, without null values.
         data_tests: [not_null]
 
+  - name: fhir_prior_authorization
+    description: >
+      Legacy prior authorization requests as FHIR R4 ExplanationOfBenefit resources (JSON,
+      use = preauthorization) conforming to the Da Vinci PDex Prior Authorization profile (STU
+      2.1.0): the decision as an X12 review action, the requested amount, the urgency as
+      priority. Only requests with a known member, a coverage span on the request date and a
+      known provider are exported.
+    columns:
+      - name: id
+        description: ExplanationOfBenefit.id (legacy prior authorization ID).
+        data_tests: [unique, not_null]
+      - name: resource
+        description: The FHIR ExplanationOfBenefit resource as JSON, without null values.
+        data_tests: [not_null]
+
   - name: fhir_organization
     description: >
       Organizations referenced by the other FHIR resources, conforming to the CARIN Blue Button

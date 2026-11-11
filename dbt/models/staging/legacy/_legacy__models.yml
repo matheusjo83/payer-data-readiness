@@ -156,6 +156,11 @@ models:
           - accepted_values:
               arguments:
                 values: ['approved', 'denied', 'pending']
+      - name: requested_amount
+        description: Estimated cost of the requested service (legacy req_amt).
+        data_tests: [not_null]
+      - name: updated_at
+        description: Last update of the legacy row.
 
   - name: stg_legacy__eligibility
     description: Member coverage spans (which plan covered a member, and when).

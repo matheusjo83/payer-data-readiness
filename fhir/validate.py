@@ -30,12 +30,18 @@ Two modes:
                    (Patient, Coverage, Organization), so the validator resolves
                    the references and checks the referenced resources against
                    the target profiles too. Writes data/fhir_validation_carin-bb/.
+  --ig pdex        the Da Vinci PDex IG (STU 2.1.0), against the Prior
+                   Authorization profile: one sample per decision (approved,
+                   denied, pending), in Bundles as above, so the Coverage is
+                   checked against Da Vinci HRex and the references against
+                   US Core. Writes data/fhir_validation_pdex/.
 
 Usage (from the repository root, Java 17+ required):
     python fhir/validate.py                 # base FHIR R4
     python fhir/validate.py --sample 50
     python fhir/validate.py --ig carin-bb   # CARIN Blue Button 2.1.0
     python fhir/validate.py --ig carin-bb --tx https://tx.fhir.org   # with terminology
+    python fhir/validate.py --ig pdex --tx https://tx.fhir.org        # PDex prior authorizations
 
 Exits with status 1 if any sample has an error, if a sample is empty, or (with
 --ig) if a sampled resource references a resource that is not exported.
@@ -64,6 +70,7 @@ MODELS = {
     "Coverage": "gold.fhir_coverage",
     "ExplanationOfBenefit": "gold.fhir_explanation_of_benefit",
     "Organization": "gold.fhir_organization",
+    "PriorAuthorization": "gold.fhir_prior_authorization",   # ExplanationOfBenefit, use = preauthorization
 }
 # Base-mode samples (kept as they were before Organization existed).
 BASE_SAMPLES = {t: None for t in ("Patient", "Coverage", "ExplanationOfBenefit")}
@@ -89,6 +96,16 @@ CARIN_SAMPLES = {
     "ExplanationOfBenefit.pharmacy": declares("C4BB-ExplanationOfBenefit-Pharmacy") + " AND id NOT LIKE 'PBM%'",
     "ExplanationOfBenefit.pbm": "id LIKE 'PBM%'",
 }
+PDEX_PACKAGE = "hl7.fhir.us.davinci-pdex#2.1.0"
+REVIEW_ACTION = ("json_extract_string(resource, "
+                 "'$.item[0].adjudication[0].extension[0].extension[0].valueCodeableConcept.coding[0].code')")
+# One sample per decision (A1 approved, A3 denied, A4 pending: X12 306 review action codes).
+PDEX_SAMPLES = {
+    "PriorAuthorization.approved": f"{REVIEW_ACTION} = 'A1'",
+    "PriorAuthorization.denied": f"{REVIEW_ACTION} = 'A3'",
+    "PriorAuthorization.pending": f"{REVIEW_ACTION} = 'A4'",
+}
+IGS = {"carin-bb": (CARIN_PACKAGE, CARIN_SAMPLES), "pdex": (PDEX_PACKAGE, PDEX_SAMPLES)}
 BUNDLE_BASE = "https://payer-data-readiness.example/fhir/"
 SAMPLE_SEED = 42
 # Code systems whose content is not distributed (the terminology package has
@@ -103,7 +120,12 @@ UNDISTRIBUTED_CODE_SYSTEMS = {
     "http://terminology.hl7.org/CodeSystem/NCPDPDispensedAsWrittenOrProductSelectionCode",
     "https://www.nubc.org/CodeSystem/RevenueCodes",
     "https://nahdo.org/sopt",
+    # X12 306, the review action code of the PDex prior authorizations: X12 code
+    # lists are licensed and no package or terminology server here has them.
+    "https://codesystem.x12.org/005010/306",
 }
+# Value sets in the same situation (the validator reports them as not found).
+UNDISTRIBUTED_VALUE_SET_PREFIXES = ("https://valueset.x12.org/",)
 # Warnings that the data cannot remove, each with the reason. They are counted
 # apart (known_warnings), listed in the summary, and never cover an error.
 KNOWN_WARNINGS = {
@@ -240,8 +262,11 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
         for issue in oo.get("issue", []):
             severity = issue.get("severity")
             text = issue.get("details", {}).get("text") or issue.get("diagnostics", "")
-            if severity in ("error", "warning") and any(f"CodeSystem '{cs}'" in text and "could not be found" in text
-                                                         for cs in UNDISTRIBUTED_CODE_SYSTEMS):
+            undistributed = (any(f"CodeSystem '{cs}'" in text and "could not be found" in text
+                                 for cs in UNDISTRIBUTED_CODE_SYSTEMS)
+                             or any(f"ValueSet '{vs}" in text and "not found" in text
+                                    for vs in UNDISTRIBUTED_VALUE_SET_PREFIXES))
+            if severity in ("error", "warning") and undistributed:
                 per_type.setdefault(rtype, Counter())["terminology_unverified"] += 1
                 continue
             where_raw = (issue.get("expression") or issue.get("location") or [""])[0]
@@ -286,7 +311,7 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", type=int, default=200, help="resources per sample")
-    ap.add_argument("--ig", choices=["carin-bb"], help=f"validate against an IG ({CARIN_PACKAGE})")
+    ap.add_argument("--ig", choices=sorted(IGS), help=f"validate against an IG ({CARIN_PACKAGE} or {PDEX_PACKAGE})")
     ap.add_argument("--top", type=int, default=15, help="most frequent messages to report")
     ap.add_argument("--tx", default="n/a", help="terminology server (default n/a: codes not checked)")
     args = ap.parse_args()
@@ -294,11 +319,12 @@ def main() -> None:
     if args.ig:
         OUT_DIR = Path(f"data/fhir_validation_{args.ig}")
     download_validator()
-    counts, unresolved = export_sample(args.sample, CARIN_SAMPLES if args.ig else BASE_SAMPLES, bundles=bool(args.ig))
+    package, samples = IGS[args.ig] if args.ig else (CARIN_PACKAGE, BASE_SAMPLES)
+    counts, unresolved = export_sample(args.sample, samples, bundles=bool(args.ig))
     # The base mode loads the CARIN package too, but only as definitions (its code
     # systems): the exported copies carry no meta.profile, so no profile applies.
-    extra = ["-ig", CARIN_PACKAGE]
-    summary = summarize(run_validator(extra, args.tx), counts, unresolved, CARIN_PACKAGE if args.ig else None,
+    extra = ["-ig", package]
+    summary = summarize(run_validator(extra, args.tx), counts, unresolved, package if args.ig else None,
                         args.top, args.tx)
 
     width = max(map(len, summary["by_resource"])) + 1

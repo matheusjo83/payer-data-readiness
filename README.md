@@ -57,7 +57,11 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   a versioned dbt seed applied over the model, with an audit trail and a simulated reviewer, and a
   second Splink model that deduplicates the PBM's own cardholders). When the merged CI run still
   showed warnings, Matheus asked for the project to be completely clean and chose to treat every
-  warning Claude Code traced, rather than only document them.
+  warning Claude Code traced, rather than only document them. For the FHIR API, Matheus chose a
+  HAPI FHIR server loaded from gold, prior authorizations as Da Vinci PDex ExplanationOfBenefit
+  resources (STU 2.1.0, without PAS), and, when the prior authorization data fell short of the
+  profile, to fix the legacy generator (requests inside the member's coverage, a requested
+  amount) and to code denials with X12's A3, which no open source could confirm.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -72,8 +76,10 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
 Synthea (synthetic FHIR R4) ──── NDJSON load ──┐
                                                ├─► Bronze ─► Silver ─► Gold ─► SQL on FHIR views
 Legacy payer DB (Postgres) ──── CDC (WAL) ─────┤   (raw)    (tested)  (models)  Quality & lineage
-                                (logged)       │                      Identity resolution
-PBM files (pipe-delimited) ──── file load ─────┘
+                                (logged)       │                 │    Identity resolution
+PBM files (pipe-delimited) ──── file load ─────┘                 │
+                                                                 └─ publish ─► HAPI FHIR server
+                                                                               (search, Bulk $export)
           └─── orchestrated by Airflow (CDC sync, slot monitor, FHIR and PBM loads, dbt, coverage) ───┘
 ```
 
@@ -91,7 +97,7 @@ mapping, identity resolution) is described in [docs/architecture.md](docs/archit
 Runs fully local, at zero cost: **Postgres** (legacy source, Docker, with the **wal2json** logical
 decoding plugin for CDC), **DuckDB** (lakehouse engine), **dbt** (transformations, tests, lineage),
 **Synthea** (synthetic FHIR data), **Splink** (probabilistic record linkage), **Python** (ingestion),
-**Apache Airflow** (orchestration, Docker).
+**Apache Airflow** (orchestration, Docker), **HAPI FHIR** (the FHIR API, Docker).
 
 ## Quickstart
 
@@ -119,10 +125,20 @@ FHIR (Phases 4 and 6):
 make conformance          # run the official SQL on FHIR v2 test suite against the view compiler
 make views                # recompile fhir/view_definitions/*.json into dbt macros (after editing a view)
 make fhir-validate-carin  # validate a sample against the CARIN Blue Button 2.1.0 profiles, codes checked by tx.fhir.org (HL7 validator, Java)
+make fhir-validate-pdex   # validate the prior authorizations against Da Vinci PDex 2.1.0 (HL7 validator, Java)
 make fhir-validate        # validate a sample against base FHIR R4 only
 ```
 
-The legacy schema gained columns in Phase 6. A database created before that needs `make reset`
+FHIR API:
+
+```bash
+make fhir-up              # start an empty HAPI FHIR server at http://localhost:8090/fhir
+make fhir-publish         # load the gold FHIR resources into it
+make fhir-api-check       # check it against gold: counts, CARIN/PDex searches, Bulk $export
+```
+
+The legacy schema gained columns in Phase 6, and `pa_req.req_amt` with the FHIR API. A database
+created before either needs `make reset`
 (which deletes the local data) and the Quickstart again.
 
 To watch change data capture at work, run the loader and the activity simulator side by side,
@@ -144,11 +160,11 @@ batch and retries on the next poll if the file is busy, but `make dbt` can still
 in the middle of a write; stopping `make cdc` first avoids that.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up seed pbm synthea ingest slot-drill
-dbt conformance fhir-validate-carin` on a clean runner. The run fails if the slot drill fails, if a
-model or data test fails, if
-any shareable SQL on FHIR test fails, or if the HL7 validator reports an error against the CARIN
-Blue Button profiles in the sample.
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up fhir-up seed pbm synthea ingest
+slot-drill dbt conformance fhir-validate-carin fhir-validate-pdex fhir-publish fhir-api-check` on a
+clean runner. The run fails if the slot drill fails, if a model or data test fails, if any
+shareable SQL on FHIR test fails, if the HL7 validator reports an error against the CARIN Blue
+Button or PDex profiles in the samples, or if a check of the FHIR server against gold fails.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -165,7 +181,8 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | SQL on FHIR         | 133 of 133 shareable tests of the specification's test suite passed                              |
 | Legacy data as FHIR | 24,507 ExplanationOfBenefit resources round-tripped with zero differing rows                     |
 | Identity resolution | PBM cardholders linked to members with 100% precision and 97.9% recall against ground truth (deterministic baseline: 99.5% and 93.4%), 98.9% after the review queue was worked; 93 of 94 duplicate cardholder IDs within the PBM merged, none wrongly |
-| FHIR validation     | 0 errors and 0 warnings on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles, references resolved, codes checked by tx.fhir.org (two warnings the data cannot remove counted apart, with their reason); 1,000 of 1,000 failed before remediation |
+| FHIR validation     | 0 errors and 0 warnings on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles and on 547 prior authorizations against Da Vinci PDex 2.1.0, references resolved, codes checked by tx.fhir.org (warnings the data cannot remove counted apart, with their reason); 1,000 of 1,000 failed CARIN before remediation |
+| FHIR API            | 42,550 resources (32,224 ExplanationOfBenefit, 3,000 of them prior authorizations) served by HAPI FHIR; 143 of 143 checks of counts, CARIN and PDex searches and a Bulk $export passed, every exported resource equal to gold |
 | Terminology         | Every ICD-10-CM, NDC and place of service code in the 29,224 exported claims valid on its service date (CMS and FDA releases); CPT, NUBC and NCPDP codes counted as unverified |
 
 ## Roadmap
@@ -181,7 +198,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Terminology:** codes checked by tx.fhir.org in the CARIN validation, and every code in every exported claim checked in dbt against the CMS ICD-10-CM and FDA NDC releases
 - [x] **Identity – Review and deduplication:** reviewer decisions as a versioned seed with an audit trail, a simulated reviewer, and duplicate cardholders within the PBM merged by a second Splink model
 - [x] **Cleanup:** every CI, Synthea, Splink and validator warning traced to its cause and fixed, or counted apart when the data cannot remove it
-- [ ] **FHIR API:** a HAPI FHIR server loaded from gold (search and Bulk `$export`), with prior authorization as PDex ExplanationOfBenefit
+- [x] **FHIR API:** a HAPI FHIR server loaded from gold (search and Bulk `$export`), with prior authorization as PDex ExplanationOfBenefit
 - [ ] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
 
 ## Project structure
@@ -192,7 +209,7 @@ scripts/       Synthea download and configuration, PBM feed generator, simulated
 ingestion/     Bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
 dbt/           Silver and gold models (including the Splink Python models), seeds (with the review decisions), tests, lineage
 airflow/       Airflow image and DAGs
-fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base and CARIN)
+fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base, CARIN, PDex), FHIR server publish and API checks
 docs/          Technical write-up, migration checklist, architecture details and results
 .github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request)
 ```

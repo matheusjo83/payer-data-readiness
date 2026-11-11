@@ -1,0 +1,25 @@
+{
+  "resourceType": "ViewDefinition",
+  "name": "prior_auth_summary",
+  "status": "draft",
+  "resource": "ExplanationOfBenefit",
+  "where": [
+    { "path": "use = 'preauthorization'" }
+  ],
+  "select": [
+    {
+      "column": [
+        { "name": "prior_auth_id", "path": "getResourceKey()", "type": "id" },
+        { "name": "patient_id", "path": "patient.getReferenceKey(Patient)", "type": "id" },
+        { "name": "provider_id", "path": "provider.getReferenceKey(Organization)", "type": "id" },
+        { "name": "service_code", "path": "item.productOrService.coding.code.first()", "type": "code" },
+        { "name": "priority", "path": "priority.coding.code.first()", "type": "code" },
+        { "name": "outcome", "path": "outcome", "type": "code" },
+        { "name": "requested_at", "path": "created", "type": "dateTime" },
+        { "name": "review_action", "path": "item.adjudication.extension('http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewAction').extension('http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/extension-reviewActionCode').value.ofType(CodeableConcept).coding.code.first()", "type": "code" },
+        { "name": "decided_at", "path": "item.adjudication.extension('http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/base-ext-when-adjudicated').value.ofType(dateTime).first()", "type": "dateTime" },
+        { "name": "requested_amount", "path": "item.adjudication.where(category.coding.code = 'submitted').amount.value.first()", "type": "decimal" }
+      ]
+    }
+  ]
+}
