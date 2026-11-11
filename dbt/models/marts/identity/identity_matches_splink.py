@@ -37,13 +37,16 @@ def model(dbt, session):
 
     # Splink's working tables stay out of the lakehouse. One thread: with several,
     # parallel sums add up in varying order and the scores differ in the 15th digit
-    # from run to run; with one, the output is identical on every run.
+    # from run to run; with one, the output is identical on every run. The input is
+    # sorted by ID: the random samples (u, with a fixed seed) depend on the row
+    # order, and the lakehouse does not keep a table's rows in a fixed order.
     con = duckdb.connect(config={"threads": 1})
     con.register("people", people)
     for source in ("legacy", "pbm"):
         con.execute(f"""
             CREATE TABLE {source}_people AS
             SELECT * EXCLUDE (source_dataset) FROM people WHERE source_dataset = '{source}'
+            ORDER BY unique_id
         """)
     db_api = DuckDBAPI(connection=con)
     inputs = [db_api.register(f"{source}_people", dataset_display_name=source) for source in ("legacy", "pbm")]

@@ -6,7 +6,7 @@ sources:
       CDC change tables of the simulated legacy payer warehouse (bronze layer).
       Append-only: one row per captured change (_op = S snapshot, I insert,
       U update, D delete, T truncate), ordered by the source log position (_lsn).
-      Staging models rebuild the current state with the legacy_current_state macro.
+      The cdc_current__<table> models keep the current state incrementally.
     schema: bronze
     tables:
       - name: mbr_mstr

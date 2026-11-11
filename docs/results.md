@@ -44,6 +44,11 @@ every request an amount. Both come from a separate random generator: every other
 out identical, value by value, and the prior authorization timeliness figures below did not
 change.
 
+The move to DuckLake changed no figure on this page apart from load times: a full build on it
+reproduced the view parity, terminology, identity, deduplication and timeliness figures. The
+Splink scores changed in their last digits, because their input is now sorted (see
+Reproducibility); every link, merge and review decision stayed the same.
+
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
@@ -63,6 +68,7 @@ change.
 | Deduplication within the PBM, and review | `gold.identity_dedupe_quality`, `gold.identity_review_audit` | After v2.0.0 |
 | Da Vinci PDex prior authorization conformance | `make fhir-validate-pdex`          | FHIR API    |
 | FHIR server against gold (searches, Bulk export) | `make fhir-api-check` (`data/fhir_api.json`) | FHIR API |
+| Incremental CDC current state against a full rebuild and Postgres | `make cdc-check`, `data/cdc_reconcile.json` | DuckLake |
 
 ## Data quality
 
@@ -115,19 +121,20 @@ metric correctly; they say nothing about how any real organization performs.
 ## Bronze load reliability
 
 From `bronze._load_log` (the source of `gold.load_reliability`), for the loads of a Quickstart
-run: the CDC snapshot of the legacy tables, the FHIR load and (since Phase 7, timed in a later
-run) the PBM files.
+run on DuckLake (2026-11-10): the CDC snapshot of the legacy tables (the one the slot drill takes,
+on the data as generated), the FHIR load and the PBM files.
 
 | Source                          | Loads | Successful | Rows loaded | Total load time |
 |---------------------------------|------:|-----------:|------------:|----------------:|
-| Legacy (Postgres, CDC snapshot) |     7 |          7 |     101,194 |          0.21 s |
-| Synthea (FHIR)                  |    24 |         24 |     611,144 |          9.52 s |
-| PBM (pipe-delimited files)      |     4 |          4 |      11,516 |          0.07 s |
-| **Total**                       |    35 |         35 |     723,854 |          9.80 s |
+| Legacy (Postgres, CDC snapshot) |     7 |          7 |     101,194 |          0.46 s |
+| Synthea (FHIR)                  |    24 |         24 |     611,144 |          3.82 s |
+| PBM (pipe-delimited files)      |     4 |          4 |      11,838 |          0.23 s |
+| **Total**                       |    35 |         35 |     724,176 |          4.51 s |
 
-The Synthea row is from a later run, after Synthea started exporting the organizations, locations,
-practitioners and practitioner roles the patient records reference (905 more resources; the
-other files are unchanged). Load times depend on the machine and its load at the time. Each table
+Synthea's 24 loads include the organizations, locations, practitioners and practitioner roles
+its records reference (905 resources), exported since the cleanup of warnings; the PBM rows
+include the duplicate cardholder IDs. Load times depend on the machine and its load at the time,
+and the loads now write Parquet through the DuckLake catalog. Each table
 and resource type was loaded once, so the 100% success rate comes from a single run
 and does not yet show a trend. The largest load was `Observation` (245,988 resources).
 
@@ -152,6 +159,36 @@ tables matched the Postgres tables row for row in all seven tables.
 
 Both processes ran on the same machine, so the source and lakehouse clocks agree; with separate
 hosts, clock skew would add to the measured latency.
+
+## Incremental current state on DuckLake
+
+Run on 2026-11-10. The current state of each legacy table is `silver.cdc_current__<table>`,
+maintained incrementally (see [architecture](architecture.md#change-data-capture)). Each case was
+followed by an incremental `dbt build` of the seven tables, the parity test with a full rebuild
+(`assert_cdc_current_state_matches_full`) and the reconciliation with Postgres
+(`scripts/cdc_reconcile.py`):
+
+| Case                                                    | Changes applied | Path            | Parity with full rebuild | Rows only on one side vs. Postgres |
+|---------------------------------------------------------|----------------:|-----------------|--------------------------|-----------------------------------:|
+| Simulated activity (300 events: 220 inserts, 149 updates, 56 deletes in `clm_ln`) | 725 | watermark | passed | 0 |
+| New snapshot (as after a lost slot)                     |   whole history | rebuild         | passed                   |                                  0 |
+| `TRUNCATE` and reload (`make seed` through CDC)         |         101,201 | rebuild         | passed                   |                                  0 |
+| Nothing new                                             |               0 | watermark       | passed                   |                                  0 |
+| `make cdc-check` (200 events), as in CI                  |  397 (20 deletes) | watermark     | passed                   |                                  0 |
+
+The incremental build of the seven tables takes about 2 seconds. To check that both checks can
+fail, one row of `cdc_current__pa_req` was deleted and one amount in `cdc_current__clm_hdr`
+changed: the parity test failed with 2 rows and the reconciliation reported both tables; a
+`--full-refresh` restored them.
+
+**Concurrent writers.** With the loader polling every 2 seconds (`make cdc`) and the activity
+simulator committing 300 events over 60 seconds, a full `dbt build` (263 nodes) ran at the same
+time. The loader applied 626 changes in 133 batches during the build, with no rejected commit;
+latency from the Postgres commit to bronze was 0.42 s at the median, 1.28 s at the 95th percentile
+and 2.77 s at most. A final sync and incremental build matched Postgres row for row. On the DuckDB
+file, the loader had to back off while dbt held the file. That run also found a gap in the parity
+test: it compared the incremental tables with a rebuild from change tables the loader had already
+moved past, and failed; it now stops at the incremental table's watermark.
 
 ## Replication slot monitoring
 
@@ -578,20 +615,26 @@ consecutive builds gave identical scores (measured in Phase 7, on the linkage mo
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
-columns that exist in the database), with the FHIR API.
+columns that exist in the database), on DuckLake, with the incremental current state.
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
-| Silver |     14 |              100% |              100% |     121 |               100% |              37.2% |
+| Silver |     21 |              100% |              100% |     235 |               100% |              28.5% |
 | Gold   |     37 |              100% |              100% |     310 |               100% |              22.9% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
-checks, not descriptive attributes such as names or amounts. `dbt build` ran 255 nodes, none
+checks, not descriptive attributes such as names or amounts. The seven incremental current state
+models added 114 silver columns, the raw legacy columns and the CDC metadata; their tests cover
+the key, `_op` and `_lsn`, so silver column test coverage fell from 37.2% to 28.5%. `dbt build`
+ran 292 nodes, none
 failed, and the rest passed except the expected warnings: 5 for the legacy issues above, plus 1
 for the replication slot when the drill has run before, as in CI.
-In Phase 4, `lakehouse_full_refresh` ran the same steps in Airflow with the same result; it was not
-rerun after Phases 6 and 7.
+On DuckLake, both refresh DAGs ran in the Airflow container (2026-11-10, `airflow dags test`):
+`lakehouse_full_refresh` (CDC sync, the three loads, the ViewDefinition check, `dbt build` with 292
+nodes and no error, coverage) and `legacy_cdc_refresh` both succeeded, and the reconciliation run
+from the host on what the container wrote matched Postgres row for row: the host and the
+container share the lakehouse through the catalog, each with its own path to the Parquet files.
 
 ## Reproducibility
 
@@ -612,8 +655,11 @@ The data generators and the gold models are pinned, so the results do not depend
 - **PBM feed.** `scripts/generate_pbm_feed.py` reads the legacy members in a fixed order and uses
   its own random generator (seed 42 + 2) and the same reference date, so repeated runs write
   byte-identical files.
-- **Identity resolution.** The Splink models sample their u probabilities with a fixed seed and
-  run on one thread, so their scores are identical from build to build. The review decisions are
+- **Identity resolution.** The Splink models sample their u probabilities with a fixed seed, run
+  on one thread and sort their input by ID, so their scores are identical from build to build.
+  The sort came with DuckLake, which does not keep a table's rows in a fixed order: without it,
+  three builds gave three sets of scores (with the same decisions), because the random samples
+  depend on the row order; with it, three builds gave identical scores. The review decisions are
   a versioned seed; `make review` dates them on the reference date, so the same data writes the
   same seed (started from an empty seed, it wrote the committed one byte for byte), and with the
   committed seed it finds an empty queue.

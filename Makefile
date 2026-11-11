@@ -1,9 +1,9 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-up fhir-publish fhir-api-check docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-up fhir-publish fhir-api-check docs docs-static airflow-up airflow-down all
 
-up:        ## Build and start the legacy Postgres database (with wal2json for CDC)
-	docker compose up -d --build legacy-db
+up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
+	docker compose up -d --build --wait legacy-db lakehouse-catalog
 
 down:      ## Stop containers (including Airflow and the FHIR server)
 	docker compose --profile airflow --profile api down
@@ -38,6 +38,15 @@ slot-drill: ## Prove the slot monitoring: push the slot past its WAL cap, check 
 
 changes:   ## Simulate activity in the legacy database (300 events over 60 seconds)
 	$(PY) legacy_db/seed/simulate_changes.py --events 300 --duration 60
+
+cdc-check: ## Exercise the incremental CDC current state: simulated changes, sync, incremental dbt build, parity with a full rebuild, reconciliation with Postgres
+	$(PY) legacy_db/seed/simulate_changes.py --events 200 --duration 20
+	$(PY) ingestion/cdc_legacy.py sync
+	cd dbt && dbt build --profiles-dir . -s path:models/staging/legacy/current assert_cdc_current_state_matches_full
+	$(PY) scripts/cdc_reconcile.py
+
+cdc-reconcile: ## Compare the lakehouse current state of each legacy table with Postgres, row by row (writes data/cdc_reconcile.json)
+	$(PY) scripts/cdc_reconcile.py
 
 views:     ## Compile the SQL on FHIR ViewDefinitions (fhir/view_definitions) into dbt macros
 	$(PY) fhir/build_views.py

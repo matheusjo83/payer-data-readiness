@@ -3,6 +3,18 @@ payer_data_readiness:
   outputs:
     local:
       type: duckdb
-      path: ../data/lakehouse.duckdb
+      # The lakehouse is a DuckLake catalog in Postgres with Parquet data
+      # (ingestion/lakehouse.py); dbt attaches it and builds every model in it.
+      path: ":memory:"
+      extensions: [ducklake, postgres]
+      attach:
+        - path: "ducklake:postgres:{{ env_var('LAKEHOUSE_CATALOG', 'host=localhost port=5434 dbname=lakehouse user=lakehouse password=lakehouse') }}"
+          alias: lakehouse
+          is_ducklake: true
+          options:
+            # dbt runs from dbt/, so the Parquet files are one level up.
+            data_path: "{{ env_var('LAKEHOUSE_DATA_PATH', '../data/lakehouse/') }}"
+            override_data_path: true
+      database: lakehouse
       schema: main
       threads: 4

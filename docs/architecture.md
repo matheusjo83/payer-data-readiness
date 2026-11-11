@@ -7,6 +7,30 @@ How each part of the lakehouse works. The overview, the stack and the Quickstart
 
 The architecture diagram and the layer table are in the [README](../README.md#architecture).
 
+## The lakehouse: DuckLake
+
+The three layers live in one [DuckLake](https://ducklake.select/) lakehouse, DuckDB's lakehouse
+format. Its catalog (schemas, tables, snapshots, the list of data files and small inline writes)
+is a Postgres database, the `lakehouse-catalog` service; its data is Parquet files under
+`data/lakehouse/`, recorded in the catalog relative to that directory. `ingestion/lakehouse.py`
+attaches it for every Python process, and dbt attaches it in `dbt/profiles.yml`; each passes its
+own absolute path to `data/lakehouse/` (`OVERRIDE_DATA_PATH`), because the host, dbt and the
+Airflow container see the repository at different places. `LAKEHOUSE_CATALOG` and
+`LAKEHOUSE_DATA_PATH` change where they point.
+
+- **Several writers.** Every process commits its transactions to the same catalog, so the CDC
+  loader can write while dbt builds. DuckLake rejects only a conflicting commit (two writers
+  changing the same table at the same moment); the loader retries a rejected batch on its next
+  poll, as it would after any failed write.
+- **What it is not.** DuckLake is not Apache Iceberg or Delta Lake. Its tables are Parquet files,
+  but the metadata lives in its own catalog schema in Postgres, not in Iceberg or Delta metadata
+  files, so engines that read those formats (Spark, Trino, Snowflake) cannot read these tables
+  through it. Reading them takes DuckDB with the DuckLake extension.
+- **Limits that shaped the code.** DuckLake has no primary key or unique constraints (keys are
+  enforced by dbt tests and by the loaders), allows one `UPDATE` or `DELETE` per `MERGE` (the
+  incremental models use delete+insert instead), and does not keep a table's rows in a fixed
+  order (the Splink models sort their input, see Identity resolution).
+
 Gold models: `dim_member`, `dim_plan`, `dim_provider`, `fct_claims`, `fct_pbm_claims`,
 `fct_member_months`, `fct_prior_auth_timeliness`; the quality and reliability models
 `dq_issue_summary`, `load_reliability`, `cdc_latency`, `cdc_slot_lag`, `fhir_view_parity` and
@@ -48,13 +72,26 @@ replication slot (wal2json). It does not change the legacy tables and it capture
   log position (`_lsn`, plus `_seq` for rows that a bulk write such as `COPY` puts in one WAL record),
   the source commit time (`_commit_ts`) and the arrival time (`_loaded_at`).
 - **No lost or repeated batches.** Changes are read without being consumed (`peek`), written to
-  DuckDB in one transaction together with the last commit LSN (`bronze._cdc_state`), and only then
+  the lakehouse in one transaction together with the last commit LSN (`bronze._cdc_state`), and only then
   released from the slot (`advance`). If the loader stops between the two steps, the next run skips
   the batch that was already stored. A dbt test checks that no log position (`_lsn`, `_seq`) appears
   twice.
-- **Current state.** Silver models rebuild each table's current state with the
-  `legacy_current_state` macro: the latest version of each primary key after the last TRUNCATE,
-  without deleted keys. Rows that share an `_lsn` are ordered by `_seq`.
+- **Current state, incremental.** Each legacy table has an incremental model,
+  `silver.cdc_current__<table>` (macro `cdc_current_state`), with the latest version of each
+  primary key. The first build takes every change after the last TRUNCATE. After that, a run
+  reads only the changes past its watermark, the highest `_lsn` in the table, takes the latest per
+  key (rows that share an `_lsn` ordered by `_seq`) and merges them by key (delete+insert). A key
+  whose latest change is a delete stays as a tombstone (`_op = 'D'`), so the watermark is always
+  the last change applied; the `stg_legacy__*` views filter tombstones out. The model rebuilds
+  itself when the history no longer continues from it: a TRUNCATE past the watermark, or a new
+  snapshot (each row records the snapshot it came from, `_snapshot_lsn`, which also catches a
+  recreated source database whose log positions start again).
+- **Two checks of the current state.** `assert_cdc_current_state_matches_full` compares each
+  incremental table with a full rebuild from all its changes (the `legacy_current_state` macro),
+  up to the incremental table's watermark, so changes the loader appends while dbt runs do not
+  count against it. `scripts/cdc_reconcile.py` (`make cdc-reconcile`) compares it with the
+  Postgres tables, row by row. `make cdc-check` runs the whole path: simulated changes, a sync, the
+  incremental build, both checks; CI runs it last.
 - **Slot monitoring.** A replication slot makes Postgres keep WAL until it is consumed, so a
   stopped loader makes the database log grow. Three pieces handle that:
   - *A cap.* The legacy database sets `max_slot_wal_keep_size = 1GB` (`docker-compose.yml`). Past
@@ -92,12 +129,14 @@ All DAGs start paused. Design choices:
 - **Airflow only orchestrates.** Tasks call the same scripts and `dbt build` used by `make`,
   through `BashOperator`. The loaders and dbt run in their own virtualenv inside the image, so
   their dependencies never conflict with Airflow's. Versions are pinned in `requirements.txt`,
-  because the host and the container write the same DuckDB file.
-- **One writer at a time.** Every task that writes the lakehouse runs in the `lakehouse` pool,
-  which has one slot: tasks from both refresh DAGs wait for each other instead of failing on a
-  locked DuckDB file. `slot_check` reads only Postgres and runs outside the pool, so a stuck
-  writer cannot delay the alert. Do not run the
-  `make` targets that write to the lakehouse while Airflow is running tasks.
+  because the host and the container write the same lakehouse with the same DuckDB (and DuckLake
+  extension) version.
+- **dbt builds one at a time.** Until the move to DuckLake, every task that wrote the lakehouse
+  queued in the `lakehouse` pool, because a DuckDB file allows one writer. Now the loaders run
+  whenever their DAG reaches them, and only `dbt_build` stays in the pool (one slot): two builds
+  rewrite the same tables, and DuckLake would reject one of them. `slot_check` reads only
+  Postgres, so a stuck lakehouse cannot delay the alert. A `make dbt` on the host while Airflow
+  builds would be the same kind of conflict.
 - **Failure policy.** Each task retries twice, except `slot_check`, whose failed run is the
   alert and should show at once. Data tests configured as warnings (known legacy issues) do not
   fail `dbt_build`; test errors do.
@@ -238,8 +277,9 @@ Identity resolution happens in the data layer, before anything reaches the API:
   patient index often does.
 - **Probabilistic model.** `identity_matches_splink` is a dbt Python model that runs
   [Splink](https://moj-analytical-services.github.io/splink/) (Fellegi-Sunter) on an in-memory
-  DuckDB with one thread, so its working tables stay out of the lakehouse and its scores are the
-  same on every run. It is trained without labels.
+  DuckDB with one thread and its input sorted by ID, so its working tables stay out of the
+  lakehouse and its scores are the same on every run (the random samples depend on the row order,
+  which the lakehouse does not fix). It is trained without labels.
 - **Deduplication within the PBM.** A PBM can reissue a card and key the same person again.
   `identity_pbm_duplicates_splink` runs the same comparisons with Splink's `dedupe_only` link type
   on the cardholders alone. Its m probabilities come from the PBM-to-payer linkage, trained the

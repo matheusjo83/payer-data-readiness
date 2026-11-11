@@ -13,4 +13,4 @@ select
         when term_dt = '99991231' then null
         else try_strptime(nullif(term_dt, ''), '%Y%m%d')::date
     end                                                     as termination_date
-from {{ legacy_current_state('pln', ['pln_id']) }}
+from {{ ref('cdc_current__pln') }} where _op <> 'D'  -- tombstones of deleted keys

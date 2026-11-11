@@ -4,9 +4,11 @@
 # FHIR validator on a sample of the legacy-derived resources against the CARIN
 # Blue Button 2.1.0 profiles and on the prior authorizations against Da Vinci PDex
 # 2.1.0, with codes checked by tx.fhir.org. dbt checks every code against the CMS
-# and FDA releases (gold.terminology_code_check). Finally the gold resources are
+# and FDA releases (gold.terminology_code_check). Then the gold resources are
 # published to a HAPI FHIR server and checked through its API (searches, Bulk
-# $export).
+# $export). Last, legacy changes are streamed and applied incrementally, and the
+# current state is checked against a full rebuild and against Postgres. The
+# lakehouse is DuckLake: a catalog in Postgres (lakehouse-catalog), Parquet data.
 name: CI
 
 on:
@@ -77,7 +79,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Start legacy database
+      - name: Start legacy database and lakehouse catalog
         run: make up
 
       # Started early: the server takes a while to boot, and publishing waits for it.
@@ -120,6 +122,12 @@ jobs:
       - name: FHIR API checks (searches, Bulk $export)
         run: make fhir-api-check
 
+      # Last, so the steps above use the data as generated: simulated legacy
+      # changes, a CDC sync, the incremental dbt run, parity with a full rebuild
+      # and a row-by-row reconciliation with Postgres.
+      - name: Incremental CDC current state
+        run: make cdc-check
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -135,8 +143,9 @@ jobs:
             data/fhir_validation_pdex/validator.log
             data/fhir_publish.json
             data/fhir_api.json
+            data/cdc_reconcile.json
             dbt/target/run_results.json
 
-      - name: Stop legacy database
+      - name: Stop containers
         if: always()
         run: docker compose --profile api down -v

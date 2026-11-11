@@ -10,4 +10,4 @@ select
         else try_strptime(nullif(term_dt, ''), '%Y%m%d')::date
     end                                                         as coverage_end_date,
     upd_ts                                                      as updated_at
-from {{ legacy_current_state('elig_span', ['elig_sk']) }}
+from {{ ref('cdc_current__elig_span') }} where _op <> 'D'  -- tombstones of deleted keys

@@ -9,4 +9,4 @@ select
     ndc_cd   as ndc_code,
     rev_cd   as revenue_code,
     upd_ts   as updated_at
-from {{ legacy_current_state('clm_ln', ['clm_id', 'ln_nbr']) }}
+from {{ ref('cdc_current__clm_ln') }} where _op <> 'D'  -- tombstones of deleted keys

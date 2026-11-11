@@ -67,7 +67,9 @@ work he did himself. Work done by Claude Code is attributed to it.
 - **Change data capture from the database log.** A Postgres logical replication slot feeds
   append-only change tables. After a streaming test of 640 changes, the current state rebuilt in
   the lakehouse matched the source row for row in all seven tables. Median latency was 2.16 s with
-  5-second polling.
+  5-second polling. On DuckLake, the current state is maintained incrementally and checked
+  against a full rebuild and against Postgres in CI, and the loader keeps writing while dbt
+  builds (0.42 s median latency during a full build).
 - **SQL on FHIR on DuckDB.** Claude Code wrote a compiler from SQL on FHIR v2 ViewDefinitions to DuckDB
   SQL.
   It passes all 133 shareable tests of the specification's shared test suite.
@@ -106,10 +108,10 @@ PBM files (pipe-delimited) ──── file load ─────┘
 ```
 
 The stack is Postgres for the legacy source (with the wal2json plugin), DuckDB as the lakehouse
-engine, dbt for transformations, tests and lineage, Synthea for synthetic FHIR data, Splink for
+engine (since the last step, on DuckLake: a Postgres catalog and Parquet files), dbt for transformations, tests and lineage, Synthea for synthetic FHIR data, Splink for
 record linkage, Python for ingestion, and Apache Airflow for orchestration. I chose it, with help from Claude Code, so that anyone
 can run the whole project with `make` and Docker, at no cost. The trade-offs of that choice come up throughout, most
-of all DuckDB's single writer.
+of all DuckDB's single writer, which the move to DuckLake at the end removed.
 
 It was built in five phases, each merged as its own pull request: foundation, change data capture,
 modeling and orchestration, FHIR, and this write-up. I wrote the first phase; Claude Code implemented
@@ -230,7 +232,8 @@ For coverage, a small script written by Claude Code combines the dbt manifest (d
 the catalog (the columns that actually exist in the database). A column that exists but is missing
 from the documentation counts against coverage. Every model and column is documented, and every
 model has at least one test. Column-level test coverage was 38.0% in silver and 23.5% in gold when
-this was first written, in Phase 3; after the work that followed v2.0.0 it is 37.0% and 22.8%. I
+this was first written, in Phase 3; now it is 28.5% and 22.9% (the incremental current state
+added 114 silver columns, the raw legacy columns, whose tests cover the key and the CDC metadata). I
 publish those numbers as they are. The tests cover keys, relationships, allowed values, parity and
 the quality checks, and adding tests to descriptive columns only to raise the percentage would make
 the metric less honest, not the data more reliable.
@@ -257,8 +260,9 @@ decisions shaped it:
 - **Pinned versions.** The host and the container write the same DuckDB file. A newer DuckDB in
   the container could write a storage format the host cannot read, so the versions are pinned.
 
-The single-writer constraint is the clearest limit of this stack. It is fine for a reference
-project. For concurrent pipelines at scale it would be the first thing to replace.
+The single-writer constraint was the clearest limit of this stack, and the first thing I would
+replace for concurrent pipelines; the last step of the project did (see DuckLake below). Since
+then only the dbt builds queue in the pool.
 
 ## SQL on FHIR, compiled to DuckDB
 
@@ -576,6 +580,49 @@ checks could fail found a gap in them: with one resource deleted on the server, 
 matched, because HAPI reuses the result of an identical search for a minute. The checks now ask
 for fresh results, and the same test fails as it should.
 
+## DuckLake, and a current state that is not rebuilt every time
+
+Two limits were left in the list of what this project did not show. The lakehouse was a DuckDB
+file, which takes one writer at a time, so the CDC loader and dbt took turns. And every build
+recomputed the current state of each legacy table with a window function over its whole change
+history, which is fine for a hundred thousand changes and not for a production log. Claude Code
+presented the alternatives, and I chose its recommendation: DuckLake, with its catalog in Postgres
+and its data in Parquet, and an incremental current state merged by key from an `_lsn` watermark,
+with deletes applied.
+
+DuckLake is DuckDB's own lakehouse format, and the documentation says what it is not: not Iceberg
+and not Delta Lake. The tables are Parquet files, but their metadata lives in DuckLake's catalog
+schema in Postgres, so Spark or Trino cannot read them through an Iceberg or Delta catalog. What
+it gives this project is several writers. With the loader polling every two seconds and the
+activity simulator committing changes, a full `dbt build` ran at the same time: the loader landed
+626 changes in 133 batches while dbt rebuilt every model, without a single conflict, with a
+median latency of 0.42 s. On the DuckDB file the loader had to back off whenever dbt held it.
+
+The move surfaced three things DuckLake does differently, and one of them was a reproducibility
+bug of mine. It has no primary key constraints, so the loader's state table lost one it did not
+need. It allows one `UPDATE` or `DELETE` per `MERGE`, so the incremental models use
+delete+insert. And it does not keep a table's rows in a fixed order: the Splink scores changed
+from build to build, because Splink's random samples, seeded as they are, depend on the order of
+the rows they sample. The DuckDB file had kept that order stable by accident. The models now
+sort their input, and three builds in a row gave identical scores again, with every link, merge
+and review decision unchanged.
+
+The incremental current state reads only the changes past its watermark and keeps the latest per
+key. A deleted key stays as a tombstone that the silver views hide, so the watermark is always the
+last change applied. Two events break the chain, and the model rebuilds itself on either: a
+TRUNCATE past the watermark, and a new snapshot, which the loader takes when the replication slot
+is lost. Each row records the snapshot it came from, which also catches a recreated source
+database, whose log positions start again from a lower number.
+
+The checks follow the project's habit. A dbt test compares every incremental table with a full
+rebuild from all its changes, and a script compares it with the Postgres tables, row by row. Both
+passed after simulated changes (725 of them, 56 deletes), after a new snapshot, after a TRUNCATE
+and reload of 101,201 rows, and after a run with nothing new. Both failed when I corrupted two
+rows of the incremental tables. The concurrent run found one more gap, in the test itself: it
+compared the incremental table with a rebuild from a change table the loader had already moved
+past. It now stops at the incremental table's watermark, which is why deleted keys stay as
+tombstones instead of being removed.
+
 ## What this does not show, and what would change for production
 
 - **Terminology.** CPT and NUBC revenue codes are licensed, so nothing here checks them, and the
@@ -593,9 +640,11 @@ for fresh results, and the same test fails as it should.
   the publish time; a production server would sit on a real database and receive only what
   changed. Prior authorizations are published, not requested: the provider-facing Prior
   Authorization API (Da Vinci PAS) is outside this project.
-- **Scale and concurrency.** DuckDB's single writer shapes the orchestration. At scale, the next step
-  would be to move to a table format with concurrent writers, such as Iceberg or Delta, and materialize the CDC
-  current state incrementally instead of rebuilding it with a window function over all changes.
+- **Scale and concurrency.** DuckLake takes several writers and the current state is incremental,
+  but everything still runs on one machine, the gold models are rebuilt in full on every build,
+  and the tables are readable only through DuckDB. A deployment that other engines must read
+  would need Iceberg or Delta, and a larger one incremental gold models and object storage for
+  the Parquet files.
 - **Operations.** A replication slot keeps the database log until it is consumed. The legacy
   database caps that retention at 1 GB, a check outside the loader alerts at 512 MB every 5
   minutes, and a drill in CI proves the alert, the loss of the slot past the cap and the recovery
@@ -629,7 +678,7 @@ for fresh results, and the same test fails as it should.
    rebuilt state against the source, not in unit-level checks.
 3. **Make tests prove they can fail.** A parity check or a validator that always passes is only
    evidence once you have seen it catch a deliberate error.
-4. **Publish the uncomfortable numbers.** Column test coverage of 22.8% in gold, eight unimplemented
+4. **Publish the uncomfortable numbers.** Column test coverage of 22.9% in gold, eight unimplemented
    experimental tests and a 14-second view are part of the result. Hiding them would make every
    other number less credible.
 5. **Treat the data layer as the product.** An interoperability API can only be as reliable as the

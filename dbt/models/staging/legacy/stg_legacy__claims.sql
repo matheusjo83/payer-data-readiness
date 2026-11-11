@@ -34,4 +34,4 @@ select
     rfl_nbr                                            as refill_number,
     rfl_auth                                           as refills_authorized,
     upd_ts                                             as updated_at
-from {{ legacy_current_state('clm_hdr', ['clm_id']) }}
+from {{ ref('cdc_current__clm_hdr') }} where _op <> 'D'  -- tombstones of deleted keys

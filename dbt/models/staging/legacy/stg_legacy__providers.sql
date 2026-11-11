@@ -18,4 +18,4 @@ select
     end                                                 as specialty,
     st_cd                                               as state,
     upd_ts                                              as updated_at
-from {{ legacy_current_state('prv', ['prv_id']) }}
+from {{ ref('cdc_current__prv') }} where _op <> 'D'  -- tombstones of deleted keys

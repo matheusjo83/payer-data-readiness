@@ -22,14 +22,15 @@ Usage (from the repository root, the server running):
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-import duckdb
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
+import lakehouse  # noqa: E402
 
-LAKEHOUSE = "data/lakehouse.duckdb"
 SEARCH_PARAMETERS = Path("fhir/server/search_parameters")
 REPORT = Path("data/fhir_publish.json")
 DEFAULT_BASE = os.environ.get("FHIR_BASE_URL", "http://localhost:8090/fhir")
@@ -99,7 +100,7 @@ def main() -> None:
     report["search_parameters"] = [p["url"] for p in params]
     print(f"Search parameters: {len(params)} ({time.time() - started:.1f} s)")
 
-    con = duckdb.connect(LAKEHOUSE, read_only=True)
+    con = lakehouse.connect(read_only=True)
     try:
         for label, model in MODELS:
             resources = [json.loads(r) for (r,) in con.execute(f"SELECT resource FROM {model} ORDER BY id").fetchall()]

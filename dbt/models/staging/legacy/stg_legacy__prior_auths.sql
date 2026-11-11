@@ -13,4 +13,4 @@ select
     end                       as decision,
     req_amt::decimal(12, 2)   as requested_amount,
     upd_ts                    as updated_at
-from {{ legacy_current_state('pa_req', ['pa_id']) }}
+from {{ ref('cdc_current__pa_req') }} where _op <> 'D'  -- tombstones of deleted keys

@@ -53,17 +53,18 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import urllib.request
 from collections import Counter
 from pathlib import Path
 
-import duckdb
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
+import lakehouse  # noqa: E402
 
 VALIDATOR_VERSION = "6.10.4"
 VALIDATOR_URL = ("https://github.com/hapifhir/org.hl7.fhir.core/releases/download/"
                  f"{VALIDATOR_VERSION}/validator_cli.jar")
 VALIDATOR_JAR = Path(f"tools/validator_cli-{VALIDATOR_VERSION}.jar")
-LAKEHOUSE = "data/lakehouse.duckdb"
 OUT_DIR = Path("data/fhir_validation")
 MODELS = {
     "Patient": "gold.fhir_patient",
@@ -205,7 +206,7 @@ def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict
     input_dir = OUT_DIR / "input"
     shutil.rmtree(input_dir, ignore_errors=True)
     input_dir.mkdir(parents=True)
-    con = duckdb.connect(LAKEHOUSE, read_only=True)
+    con = lakehouse.connect(read_only=True)
     counts, unresolved = {}, {}
     try:
         for label, condition in samples.items():

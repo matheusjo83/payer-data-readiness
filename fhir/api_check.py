@@ -21,15 +21,16 @@ Usage (from the repository root, after make fhir-publish):
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
 
-import duckdb
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
+import lakehouse  # noqa: E402
 
-LAKEHOUSE = "data/lakehouse.duckdb"
 REPORT = Path("data/fhir_api.json")
 DEFAULT_BASE = os.environ.get("FHIR_BASE_URL", "http://localhost:8090/fhir")
 SAMPLE = 20
@@ -179,7 +180,7 @@ def main() -> None:
     metadata = json.loads(get(f"{base}/metadata")[2])
     checks = Checks()
     checks.add("server", "fhirVersion", "4.0.1", metadata.get("fhirVersion"))
-    con = duckdb.connect(LAKEHOUSE, read_only=True)
+    con = lakehouse.connect(read_only=True)
     try:
         check_counts(base, con, checks)
         check_searches(base, con, checks)

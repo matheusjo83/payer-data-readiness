@@ -27,14 +27,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-import duckdb
 import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "ingestion"))
 
 from cdc_legacy import DEFAULT_MAX_RETAINED_MB, PG_DSN, slot_status  # noqa: E402
-from common import LAKEHOUSE_PATH  # noqa: E402
+import lakehouse  # noqa: E402
 
 SUMMARY = ROOT / "data" / "slot_drill.json"
 MAX_SWITCHES = 160  # 160 x 16 MB = 2.5 GB, well past the 1 GB cap
@@ -104,7 +103,7 @@ def main() -> None:
     expect(result.returncode == 0, "sync recovers from a lost slot")
     expect("invalidated" in result.stdout, "sync reports the loss and takes a new snapshot")
 
-    with duckdb.connect(str(ROOT / LAKEHOUSE_PATH), read_only=True) as con:
+    with lakehouse.connect(read_only=True) as con:
         losses = con.execute(
             "SELECT count(*) FROM bronze._cdc_slot_status "
             "WHERE action = 'resnapshot' AND wal_status = 'lost'"
