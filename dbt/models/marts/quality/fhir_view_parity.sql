@@ -5,6 +5,8 @@
 --   synthea_patients  ViewDefinition over Synthea Patient vs. the hand-written stg_fhir__patients
 --   legacy_*          round trip: legacy gold table -> FHIR resource -> ViewDefinition -> back
 --   pbm_*             the same round trip for the PBM claims exported as ExplanationOfBenefit
+--   legacy_prior_auths  the round trip of the prior authorizations (PDex): every legacy
+--                     request, with its review action read back as the decision
 {% set comparisons = {
     'synthea_patients': {
         'view': "select patient_id, gender, try_cast(birth_date as date) as birth_date, state, postal_code
@@ -62,6 +64,19 @@
         'reference': "select rx_claim_id, 1, ndc_code, fill_date, ingredient_cost
                       from " ~ ref('fct_pbm_claims') ~ "
                       where has_linked_member and is_within_eligibility",
+    },
+    'legacy_prior_auths': {
+        'view': "select prior_auth_id, patient_id, provider_id, service_code, priority = 'stat',
+                        try_cast(replace(requested_at, 'Z', '') as timestamp),
+                        case review_action when 'A1' then 'approved' when 'A3' then 'denied'
+                                           when 'A4' then 'pending' end,
+                        try_cast(replace(decided_at, 'Z', '') as timestamp),
+                        cast(requested_amount as decimal(12, 2))
+                 from " ~ ref('vd_legacy__prior_auth_summary'),
+        'reference': "select prior_auth_id, member_id, provider_id, service_code, is_expedited,
+                             date_trunc('second', requested_at), decision, date_trunc('second', decided_at),
+                             requested_amount
+                      from " ~ ref('stg_legacy__prior_auths'),
     },
 } %}
 

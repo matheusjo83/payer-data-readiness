@@ -44,7 +44,9 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   validation, plus the public CMS and FDA code lists checked in dbt against every resource, with
   CPT left unverified because it is licensed) and how to finish identity resolution (reviewer
   decisions as a versioned seed applied over the model, with an audit trail and a simulated
-  reviewer, and a second Splink model for duplicates within the PBM).
+  reviewer, and a second Splink model for duplicates within the PBM). For the FHIR API he chose a
+  HAPI FHIR server loaded from gold and prior authorizations as Da Vinci PDex resources, and,
+  when the prior authorization data fell short of the profile, how to complete it.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -77,6 +79,10 @@ work he did himself. Work done by Claude Code is attributed to it.
   profiles. Every ICD-10-CM, NDC and place of service code in every exported claim is valid on its
   service date against the CMS and FDA releases, after one diagnosis code the generator used turned
   out to have been retired in 2021.
+- **A FHIR API, checked against the source.** A HAPI FHIR server serves 42,550 resources loaded
+  from gold, including 3,000 prior authorizations as Da Vinci PDex resources (zero errors against
+  PDex 2.1.0). 143 checks computed from gold pass through the API: counts, the searches CARIN
+  and PDex require, and a Bulk `$export` whose every resource equals its gold version.
 - **Identity resolution with ground truth.** A PBM feed sends 2,900 of the members under its own
   IDs, with nicknames, typos, changed names, mistyped birth dates and old addresses, plus 275 people
   the payer does not know and 94 people with a second cardholder ID. A Splink model links 2,928 of
@@ -526,6 +532,50 @@ What remains is deliberate or outside the project: the six dbt warnings that cou
 injected into the legacy data and the slot the drill drops (they are the evidence, not noise), and
 one line from the Java runtime inside the pinned Synthea release.
 
+## A FHIR API, and prior authorizations
+
+CMS-0057-F asks for APIs, and until here the project produced resources but served none. Claude
+Code presented the options, and I chose its recommendations: a HAPI FHIR server in Docker, loaded
+from the gold models by a publish step, with search and Bulk `$export`; and the prior
+authorizations, which the Patient Access API must include, as Da Vinci PDex Prior Authorization
+resources, an ExplanationOfBenefit with `use = preauthorization`. PDex rather than PAS, because
+PAS is the exchange between provider and payer for asking for an authorization; what a member's
+app reads is the payer's record of it. CMS lists PDex 2.0.0 and 2.1.0 for the Patient Access API
+and marks 2.0.0 as derived from expired standards, so this uses 2.1.0, as it uses CARIN 2.1.0.
+
+A prototype validated against PDex before any model was written found four gaps. Two were
+mechanical: the profile has to be declared without a version, and the payer needed an identifier,
+which Da Vinci HRex requires of the organization a Coverage points to. Two were in the data, and
+Claude Code brought them to me as decisions:
+
+- **Requests outside coverage.** 483 of the 3,000 requests were dated on a day the member had no
+  coverage, and an ExplanationOfBenefit needs one. It was the artifact the claims had in Phase 3:
+  the generator draws the member and the date independently. I chose to fix it the same way. The
+  date moves into the coverage, at the same time of day and with the same delay to the decision,
+  from a separate random generator, so the timeliness figures did not change, and every other
+  legacy table came out identical, value by value.
+- **An amount.** PDex puts the decision on an adjudication that must carry an amount, and the
+  legacy table had none. The generator now records a requested amount, as Phase 6 added the
+  fields CARIN required.
+
+The decision itself is an X12 code, and X12 code lists are licensed. The PDex and PAS examples
+show A1 (Certified in total) and A4 (Pending); no open source shows the code for a denial. I chose
+A3 (Not Certified), the X12 code for it, and the documentation says that nothing here can verify
+it. HRex also requires a birth date, which the 44 members with an invalid legacy birth date do
+not have; as with gender in Phase 6, the value is not invented: the resource says it is unknown,
+with FHIR's data-absent reason. With these, the validator reports zero errors and zero warnings on
+547 prior authorizations, one sample per decision, and a round trip through a ViewDefinition gives
+back every request with zero differing rows.
+
+The server is checked the way the rest of the project is: against gold, not against itself. A
+script computes every expected figure from the lakehouse and asks the API: counts by type and by
+use, the searches the CARIN and PDex capability statements require (five of them are not in base
+FHIR, so their definitions are loaded from the two guides first), and a Bulk export. All 143
+checks pass, and all 42,550 exported resources equal gold apart from `meta`. Proving that the
+checks could fail found a gap in them: with one resource deleted on the server, the counts still
+matched, because HAPI reuses the result of an identical search for a minute. The checks now ask
+for fresh results, and the same test fails as it should.
+
 ## What this does not show, and what would change for production
 
 - **Terminology.** CPT and NUBC revenue codes are licensed, so nothing here checks them, and the
@@ -537,6 +587,12 @@ one line from the Java runtime inside the pinned Synthea release.
   The narratives here are generated one-line summaries, enough for `dom-6` but not a designed
   human-readable view. The validator covers a sample; the code check in dbt covers every
   resource, but only the code systems it has.
+- **The API.** The server has no authentication: a Patient Access API needs SMART on FHIR
+  authorization, so that each member reads only their own data, and nothing here does that. It
+  runs on HAPI's embedded H2 database and is rebuilt on every publish, so its `lastUpdated` is
+  the publish time; a production server would sit on a real database and receive only what
+  changed. Prior authorizations are published, not requested: the provider-facing Prior
+  Authorization API (Da Vinci PAS) is outside this project.
 - **Scale and concurrency.** DuckDB's single writer shapes the orchestration. At scale, the next step
   would be to move to a table format with concurrent writers, such as Iceberg or Delta, and materialize the CDC
   current state incrementally instead of rebuilding it with a window function over all changes.
@@ -583,7 +639,8 @@ one line from the Java runtime inside the pinned Synthea release.
 
 ```bash
 make up && make seed && make pbm && make synthea && make ingest && make dbt
-make coverage conformance fhir-validate-carin
+make coverage conformance fhir-validate-carin fhir-validate-pdex
+make fhir-up fhir-publish fhir-api-check
 make review   # optional: rewrites the review decisions seed from the ground truth
 ```
 

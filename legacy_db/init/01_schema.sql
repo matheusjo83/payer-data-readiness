@@ -88,5 +88,6 @@ CREATE TABLE pa_req (             -- prior authorization requests
     req_ts      TIMESTAMP,
     dcsn_ts     TIMESTAMP,        -- NULL while pending
     dcsn_cd     CHAR(1),          -- A approved, D denied, P pending
+    req_amt     NUMERIC(12,2),    -- estimated cost of the requested service
     upd_ts      TIMESTAMP
 );

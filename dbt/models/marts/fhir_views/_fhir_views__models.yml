@@ -95,3 +95,30 @@ models:
   - name: vd_legacy__eob_items
     description: ViewDefinition eob_items over legacy-derived ExplanationOfBenefit resources (one row per item).
     columns: *eob_items
+
+  - name: vd_legacy__prior_auth_summary
+    description: >
+      ViewDefinition prior_auth_summary over the PDex prior authorizations
+      (ExplanationOfBenefit, use = preauthorization).
+    columns:
+      - name: prior_auth_id
+        description: ExplanationOfBenefit resource key (the legacy prior authorization ID).
+        data_tests: [unique, not_null]
+      - name: patient_id
+        description: Key of the referenced Patient.
+      - name: provider_id
+        description: Key of the referenced provider Organization.
+      - name: service_code
+        description: CPT code of the requested service.
+      - name: priority
+        description: stat (expedited) or normal.
+      - name: outcome
+        description: queued (pending) or complete (decided).
+      - name: requested_at
+        description: ExplanationOfBenefit.created (request time), as text.
+      - name: review_action
+        description: X12 306 review action code (A1, A3 or A4).
+      - name: decided_at
+        description: Decision time (base-ext-when-adjudicated), as text; null while pending.
+      - name: requested_amount
+        description: Requested amount (the submitted adjudication).

@@ -1,7 +1,10 @@
 -- Legacy members as FHIR R4 Patient resources conforming to the CARIN Blue
 -- Button Patient profile (STU 2.1.0). Legacy gender codes outside M/F/U become
 -- 'unknown': the profile requires a gender, and FHIR's 'unknown' states that
--- it is not known instead of guessing one. A member linked to PBM cardholders
+-- it is not known instead of guessing one. A birth date the legacy source has
+-- invalid is left out, with a data-absent-reason extension (unknown) in its
+-- place (_birthDate): Da Vinci HRex, which the PDex prior authorizations reach
+-- through the Coverage, requires a birth date. A member linked to PBM cardholders
 -- (gold.member_xref) also carries each cardholder ID as a member identifier: a
 -- person can hold more than one (gold.pbm_persons).
 --
@@ -28,6 +31,9 @@ select
         end,
         'gender', case when gender in ('male', 'female') then gender else 'unknown' end,
         'birthDate', strftime(birth_date, '%Y-%m-%d'),
+        '_birthDate', case when birth_date is null then json_object('extension', json_array(json_object(
+            'url', 'http://hl7.org/fhir/StructureDefinition/data-absent-reason',
+            'valueCode', 'unknown'))) end,
         'address', json_array(json_merge_patch('{}', json_object(
             'postalCode', zip_code,
             'state', state,

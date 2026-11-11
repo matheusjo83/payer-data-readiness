@@ -2,8 +2,11 @@
 # the replication slot drill (monitoring alerts and recovery), dbt build (models
 # and data tests), the SQL on FHIR v2 test suite (shareable tests) and the HL7
 # FHIR validator on a sample of the legacy-derived resources against the CARIN
-# Blue Button 2.1.0 profiles, with codes checked by tx.fhir.org. dbt checks every
-# code against the CMS and FDA releases (gold.terminology_code_check).
+# Blue Button 2.1.0 profiles and on the prior authorizations against Da Vinci PDex
+# 2.1.0, with codes checked by tx.fhir.org. dbt checks every code against the CMS
+# and FDA releases (gold.terminology_code_check). Finally the gold resources are
+# published to a HAPI FHIR server and checked through its API (searches, Bulk
+# $export).
 name: CI
 
 on:
@@ -77,6 +80,10 @@ jobs:
       - name: Start legacy database
         run: make up
 
+      # Started early: the server takes a while to boot, and publishing waits for it.
+      - name: Start FHIR server
+        run: make fhir-up
+
       - name: Generate legacy data
         run: make seed
 
@@ -104,6 +111,15 @@ jobs:
       - name: FHIR validation (CARIN Blue Button 2.1.0, tx.fhir.org)
         run: make fhir-validate-carin
 
+      - name: FHIR validation (Da Vinci PDex 2.1.0 prior authorizations, tx.fhir.org)
+        run: make fhir-validate-pdex
+
+      - name: Publish to the FHIR server
+        run: make fhir-publish
+
+      - name: FHIR API checks (searches, Bulk $export)
+        run: make fhir-api-check
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -115,8 +131,12 @@ jobs:
             data/slot_drill.json
             data/fhir_validation_carin-bb/summary.json
             data/fhir_validation_carin-bb/validator.log
+            data/fhir_validation_pdex/summary.json
+            data/fhir_validation_pdex/validator.log
+            data/fhir_publish.json
+            data/fhir_api.json
             dbt/target/run_results.json
 
       - name: Stop legacy database
         if: always()
-        run: docker compose down -v
+        run: docker compose --profile api down -v

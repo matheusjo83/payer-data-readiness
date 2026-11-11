@@ -37,6 +37,13 @@ dedupe and review figures, added Synthea's provider files to the bronze loads, a
 narratives and plan type codes to the FHIR resources; the linkage, terminology, parity and other
 figures did not change.
 
+For the FHIR API, the legacy generator moved the 483 prior authorizations it had dated outside
+the member's coverage (it draws the member and the date independently, as it once did for claims)
+to a day inside it, at the same time of day and with the same delay to the decision, and gave
+every request an amount. Both come from a separate random generator: every other legacy table came
+out identical, value by value, and the prior authorization timeliness figures below did not
+change.
+
 ## Metrics
 
 | Indicator                              | Where it is measured                    | Status      |
@@ -54,6 +61,8 @@ figures did not change.
 | Replication slot lag and losses        | `gold.cdc_slot_lag`, `make slot-check`, `make slot-drill` | Operations |
 | Codes valid in their code systems      | `gold.terminology_code_check`, `make fhir-validate-carin` (tx.fhir.org) | After v2.0.0 |
 | Deduplication within the PBM, and review | `gold.identity_dedupe_quality`, `gold.identity_review_audit` | After v2.0.0 |
+| Da Vinci PDex prior authorization conformance | `make fhir-validate-pdex`          | FHIR API    |
+| FHIR server against gold (searches, Bulk export) | `make fhir-api-check` (`data/fhir_api.json`) | FHIR API |
 
 ## Data quality
 
@@ -188,6 +197,9 @@ the review decisions (see Identity resolution), the PBM claims exported are 4,71
 ExplanationOfBenefit and 326 Organization resources in all), and 2,872 Patients carry cardholder
 IDs. The other 493 of the 25,000 claims were held back by the integrity gate: 242 with an
 unknown member and 251 outside the member's coverage, the counts in the data-quality table above.
+With the FHIR API, also 3,000 prior authorizations (Da Vinci PDex, ExplanationOfBenefit with
+`use = preauthorization`): 2,419 approved, 434 denied and 147 pending, all of them, since every
+request now has a known member, a coverage span on its date and a known provider.
 
 **View parity** (`gold.fhir_view_parity`):
 
@@ -200,8 +212,11 @@ unknown member and 251 outside the member's coverage, the counts in the data-qua
 | `legacy_claim_lines` |    61,228 |         61,228 |            0 |                 0 |
 | `pbm_claims`         |     4,717 |          4,717 |            0 |                 0 |
 | `pbm_claim_lines`    |     4,717 |          4,717 |            0 |                 0 |
+| `legacy_prior_auths` |     3,000 |          3,000 |            0 |                 0 |
 
-To check that the comparison can fail, it was run against deliberately altered references: swapping
+The prior authorization comparison reads the review action back as the decision; with the
+denials read as approvals in the reference, it found 434 rows on one side, one per denial. To
+check that the other comparisons can fail, they were run against deliberately altered references: swapping
 paid for charged amounts gave 24,507 mismatched rows, adding the claims outside coverage gave 251,
 and, in Phase 4 when invalid gender codes were still omitted, mapping them to `unknown` gave 51.
 
@@ -319,6 +334,61 @@ choice of NDC would remove the warning. The lakehouse follows the FDA, which pub
 system, and the validation counts the warning as known. The FDA publishes only its current directory, so the NDC check cannot be pinned: the
 release date and SHA-256 of each load are recorded in `bronze.terminology_releases`, and a drug
 removed from the directory would make older claims fail.
+
+**Da Vinci PDex conformance** (`make fhir-validate-pdex`, HL7 validator 6.10.4, PDex STU 2.1.0,
+tx.fhir.org): one sample per decision, each prior authorization in a Bundle with its Patient,
+Coverage and Organizations, so the Coverage is checked against Da Vinci HRex and the others against
+US Core.
+
+| Sample                     | Validated | With errors | Warnings | Codes not verifiable |
+|----------------------------|----------:|------------:|---------:|---------------------:|
+| Prior authorization, approved |    200 |           0 |        0 |                  400 |
+| Prior authorization, denied   |    200 |           0 |        0 |                  400 |
+| Prior authorization, pending  |    147 |           0 |        0 |                  294 |
+
+The codes not verifiable are the X12 review action codes, two messages per resource (the code
+system and the value set): X12 code lists are licensed, and neither the packages nor tx.fhir.org
+have them. A1 (Certified in total) and A4 (Pending) appear in the PDex and PAS examples; A3 (Not
+Certified), used for denials, appears in no open source, so it is checked by nothing here. The
+first prototype failed on four points, each fixed before the model was written: the profile must be
+declared without a version, the review action needs an amount next to it, the payer
+Organization needs an identifier (HRex), and a Patient needs a birth date (HRex), which the 44
+members with an invalid legacy birth date now carry as a data-absent reason.
+
+**FHIR API** (`make fhir-up fhir-publish fhir-api-check`, HAPI FHIR 8.12.0, run on 2026-11-10).
+Loading the server, an empty one each time:
+
+| Resources                                  |  Count | Load time |
+|--------------------------------------------|-------:|----------:|
+| Search parameters (CARIN and PDex)         |      5 |     0.8 s |
+| Organization                               |    326 |     1.8 s |
+| Patient                                    |  5,000 |     8.1 s |
+| Coverage                                   |  5,000 |     5.7 s |
+| ExplanationOfBenefit, claims               | 29,224 |    79.0 s |
+| ExplanationOfBenefit, prior authorizations |  3,000 |     8.5 s |
+
+Then 143 checks, every expected value computed from gold, all passed:
+
+| Checks                                                        | Passed |
+|---------------------------------------------------------------|-------:|
+| Server version (FHIR 4.0.1)                                   |  1 / 1 |
+| Counts: each type, ExplanationOfBenefit by `use` and by `type`, `billable-period-start` | 10 / 10 |
+| `Patient?identifier` by member ID                             | 20 / 20 |
+| `Patient?identifier` by PBM cardholder ID (resolves to the member) | 20 / 20 |
+| `ExplanationOfBenefit?patient`                                | 20 / 20 |
+| `ExplanationOfBenefit?patient&use=preauthorization`           | 20 / 20 |
+| `ExplanationOfBenefit?identifier`                             | 20 / 20 |
+| `Coverage?patient`                                            | 20 / 20 |
+| Bulk `$export`: IDs equal to gold, none extra, every resource equal to gold apart from `meta` | 12 / 12 |
+
+The Bulk export (system level, the four types) returned 42,550 resources in 44 NDJSON files in
+36.8 s, and every one equals its gold resource except for `meta`, where HAPI sets `versionId` and
+replaces `lastUpdated` with the time it stored the resource. To check that the checks can fail,
+one Patient's gender was changed on the server and one prior authorization deleted: 5 checks
+failed (the three counts that include that prior authorization, the export's IDs and the changed
+Patient), and all passed again after publishing. A first run had not caught the deleted resource
+in the counts, because HAPI reuses the result of an identical search for a minute; the checks now
+send `Cache-Control: no-cache`.
 
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
 removed from the exported copies; the CARIN package is loaded only for its code systems): 0
@@ -508,19 +578,18 @@ consecutive builds gave identical scores (measured in Phase 7, on the linkage mo
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
-columns that exist in the database), after the terminology and identity work that followed
-v2.0.0.
+columns that exist in the database), with the FHIR API.
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
-| Silver |     14 |              100% |              100% |     119 |               100% |              37.0% |
-| Gold   |     35 |              100% |              100% |     298 |               100% |              22.8% |
+| Silver |     14 |              100% |              100% |     121 |               100% |              37.2% |
+| Gold   |     37 |              100% |              100% |     310 |               100% |              22.9% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
-checks, not descriptive attributes such as names or amounts. `dbt build` ran 247 nodes: 241
-passed, 6 ended with the expected warnings (5 for the legacy issues above, 1 for the replication
-slot the drill drops on purpose), and none failed.
+checks, not descriptive attributes such as names or amounts. `dbt build` ran 255 nodes, none
+failed, and the rest passed except the expected warnings: 5 for the legacy issues above, plus 1
+for the replication slot when the drill has run before, as in CI.
 In Phase 4, `lakehouse_full_refresh` ran the same steps in Airflow with the same result; it was not
 rerun after Phases 6 and 7.
 
