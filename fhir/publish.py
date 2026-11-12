@@ -2,15 +2,20 @@
 
 Two servers, each with the data of its APIs:
 
-  patient-access    (fhir-server, port 8090) the Patient Access API: the claims
+  patient-access    (fhir-server, through fhir-gateway-patient, port 8090) the Patient Access API: the claims
                     with financial data (CARIN Blue Button), the prior
                     authorizations (PDex), Patient, Coverage, Organization.
-  provider-access   (fhir-server-provider, port 8091, behind fhir-gateway) the
+  provider-access   (fhir-server-provider, through fhir-gateway, port 8092) the
                     Provider Access and Payer-to-Payer APIs: the claims without
                     financial data (CARIN Basis profiles, same IDs), the prior
                     authorizations, Patient, Coverage, Organization, the
                     attribution lists (PDex Provider Group) and the opt-outs (PDex
                     Provider Access Consent).
+
+The HAPI servers have no port on the host: the resources go through the
+gateways, with an access token of the payer's administration client of each
+API (admin-patient-access, admin-provider-access: SMART Backend Services, keys
+from make fhir-clients).
 
 Loads, in this order, so every reference points to a resource already on the
 server:
@@ -44,6 +49,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from smart_client import BackendClient
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
 import lakehouse  # noqa: E402
 
@@ -65,19 +72,22 @@ PROVIDER_MODELS = [
     ("Consent (Provider Access opt-outs)", "gold.fhir_provider_consent"),
     ("Group (attribution lists)", "gold.fhir_provider_group"),
 ]
-# server -> (base URL, models, report)
+# server -> (gateway base URL, models, report, admin client)
 SERVERS = {
     "patient-access": (os.environ.get("FHIR_BASE_URL", "http://localhost:8090/fhir"), MODELS,
-                       Path("data/fhir_publish.json")),
-    "provider-access": (os.environ.get("FHIR_PROVIDER_BASE_URL", "http://localhost:8091/fhir"), PROVIDER_MODELS,
-                        Path("data/fhir_publish_provider.json")),
+                       Path("data/fhir_publish.json"), "admin-patient-access"),
+    "provider-access": (os.environ.get("FHIR_GATEWAY_URL", "http://localhost:8092/fhir"), PROVIDER_MODELS,
+                        Path("data/fhir_publish_provider.json"), "admin-provider-access"),
 }
+ADMIN_SCOPE = "system/*.cruds"
 
 
-def request(method: str, url: str, body: dict | None = None, timeout: int = 300) -> tuple[int, dict]:
+def request(method: str, url: str, body: dict | None = None, timeout: int = 300,
+            client: BackendClient | None = None) -> tuple[int, dict]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
-        "Content-Type": "application/fhir+json", "Accept": "application/fhir+json"})
+        "Content-Type": "application/fhir+json", "Accept": "application/fhir+json",
+        **(client.headers() if client else {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
@@ -106,23 +116,24 @@ def transaction(resources: list[dict]) -> dict:
         for r in resources]}
 
 
-def put_all(base: str, resources: list[dict], batch: int) -> None:
+def put_all(base: str, resources: list[dict], batch: int, client: BackendClient) -> None:
     for start in range(0, len(resources), batch):
-        _, response = request("POST", base, transaction(resources[start:start + batch]))
+        _, response = request("POST", base, transaction(resources[start:start + batch]), client=client)
         failed = [e for e in response.get("entry", [])
                   if not e.get("response", {}).get("status", "").startswith(("200", "201"))]
         if failed:
             raise SystemExit(f"Transaction rejected entries: {failed[:3]}")
 
 
-def publish(name: str, base: str, models: list, report_path: Path, batch: int) -> None:
+def publish(name: str, base: str, models: list, report_path: Path, client_id: str, batch: int) -> None:
     base = base.rstrip("/")
     wait_for_server(base)
+    client = BackendClient(client_id, ADMIN_SCOPE)
     report = {"server": base, "apis": name, "loads": []}
 
     params = [json.loads(p.read_text()) for p in sorted(SEARCH_PARAMETERS.glob("*.json"))]
     started = time.time()
-    put_all(base, params, batch)
+    put_all(base, params, batch, client)
     report["search_parameters"] = [p["url"] for p in params]
     print(f"[{name}] Search parameters: {len(params)} ({time.time() - started:.1f} s)")
 
@@ -131,7 +142,7 @@ def publish(name: str, base: str, models: list, report_path: Path, batch: int) -
         for label, model in models:
             resources = [json.loads(r) for (r,) in con.execute(f"SELECT resource FROM {model} ORDER BY id").fetchall()]
             started = time.time()
-            put_all(base, resources, batch)
+            put_all(base, resources, batch, client)
             seconds = round(time.time() - started, 1)
             report["loads"].append({"resources": label, "model": model, "count": len(resources), "seconds": seconds})
             print(f"[{name}] {label}: {len(resources)} ({seconds} s)")
@@ -151,8 +162,8 @@ def main() -> None:
     # and each thread opens its own lakehouse connection. A failure on either one
     # is raised here, after both have finished.
     with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
-        futures = [pool.submit(publish, name, base, models, report_path, args.batch)
-                   for name, base, models, report_path in chosen]
+        futures = [pool.submit(publish, name, base, models, report_path, client_id, args.batch)
+                   for name, base, models, report_path, client_id in chosen]
     for future in futures:
         future.result()
 

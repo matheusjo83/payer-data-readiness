@@ -232,7 +232,9 @@ exported as a data-absent reason (`unknown`) instead of being left out.
 ## The FHIR API
 
 A HAPI FHIR server (`hapiproject/hapi:v8.12.0-2`, service `fhir-server`, profile `api` in
-`docker-compose.yml`) serves the gold resources at `http://localhost:8090/fhir`. Its H2 database
+`docker-compose.yml`) holds the gold resources, served at `http://localhost:8090/fhir` through a
+gateway that checks every caller's SMART access token (see [API security](#api-security-smart-on-fhir));
+the server itself has no port on the host. Its H2 database
 lives inside the container, and `make fhir-up` recreates the container, so every load starts from
 an empty server and a resource removed from gold cannot linger. The server does not validate
 requests: the resources are validated before they are published.
@@ -243,14 +245,16 @@ requests: the resources are validated before they are published.
   the two packages into `fhir/server/search_parameters/`), so the data is indexed with them. Then
   it loads Organization, Patient, Coverage and ExplanationOfBenefit (claims, then prior
   authorizations) from the gold models, in that order, as transactions of 500 PUTs by ID: a batch
-  loads completely or not at all, and a second run replaces instead of duplicating.
+  loads completely or not at all, and a second run replaces instead of duplicating. It goes through
+  the gateways with the payer's administration client, and loads both servers at the same time.
 - **Check.** `fhir/api_check.py` (`make fhir-api-check`) computes every expected figure from gold
   and compares it with the server: the count of each resource type and of ExplanationOfBenefit by
   `use` and `type`; the searches the CARIN and PDex capability statements require (by patient,
   identifier, use, billable period), on a reproducible sample of members, claims and PBM cardholder
   IDs; and a system-level Bulk `$export`, whose IDs must be exactly the gold IDs and whose
   resources must equal gold apart from `meta`. Searches are sent with `Cache-Control: no-cache`,
-  because HAPI reuses the result of an identical search for a minute.
+  because HAPI reuses the result of an identical search for a minute. It runs as the
+  administration client: it checks what the server holds, not what a member's app may see.
 - **What the server changes.** HAPI sets `meta.versionId` and replaces `meta.lastUpdated` with the
   time it stored the resource. The legacy update time stays in gold. Since every publish loads
   every resource, `_lastUpdated` on the server is the publish time; a production feed would publish
@@ -269,11 +273,13 @@ second Provider Access workflow, `$provider-member-match`, and returns the Payer
 as Group NDJSON; neither is implemented here).
 
 ```
-gold (dbt) ── publish ─► fhir-server-provider (HAPI, :8091) ◄── fhir-gateway (:8092) ◄── providers, new payers
-                         claims without financial data       $davinci-data-export
-                         prior authorizations, Patient,       $bulk-member-match, $member-match
-                         Coverage, Organization,              everything else passed through
-                         attribution lists, opt-outs
+gold (dbt) ── publish ─► fhir-gateway (:8092) ─► fhir-server-provider (HAPI, Docker network only)
+                         SMART token checked     claims without financial data, prior
+                         $davinci-data-export    authorizations, Patient, Coverage,
+                         $bulk-member-match      Organization, attribution lists, opt-outs
+                         $member-match
+                               ▲
+                               └── providers, other payers (tokens from fhir-auth, :8093)
 ```
 
 - **Data without financial elements.** `gold.fhir_explanation_of_benefit_basis` derives each claim
@@ -354,12 +360,66 @@ gold (dbt) ── publish ─► fhir-server-provider (HAPI, :8091) ◄── fh
   for every rule above; the Payer-to-Payer export of the resulting match group; and
   `$member-match`. It resets the attribution lists it exports from gold first, so it can run
   again.
-- **What is not done.** Nothing authenticates the caller (SMART Backend Services, which PDex
-  requires, is on the backlog), so any client can export any list, and a provider could read an
-  opted-out member through a plain search: only the bulk export enforces the opt-out. The
-  Payer-to-Payer consent is checked when the match is made, not again at export. There is no
+- **What is not done.** The Payer-to-Payer consent is checked when the match is made, not again at
+  export. There is no
   clinical (US Core) data to share, since the legacy source has only claims, and no drug prior
   authorizations, which both APIs exclude. `$bulk-member-match` answers synchronously.
+
+## API security (SMART on FHIR)
+
+Both APIs require an access token. A minimal SMART authorization server (`fhir/auth/server.py`,
+service `fhir-auth`, `http://localhost:8093`) issues them, and the gateways
+(`fhir/gateway/gateway.py`) verify them and decide, request by request, what the caller may see.
+The two HAPI servers are only on the Docker network, so the gateways are the only way in. Matheus
+chose this design over Keycloak and over HAPI interceptors: an authorization server written here
+covers the SMART specifics (patient context, asymmetric client authentication, v2 scopes) without
+custom mappers and starts in seconds in CI, and the enforcement stays in the Python gateway that
+already implements the PDex operations.
+
+- **Two flows.** The Patient Access API uses SMART App Launch: the app sends the member to
+  `/authorize` with PKCE (S256, required), the member logs in, and the app exchanges the code for an
+  access token with the patient context, an `id_token` and a refresh token (rotated on use). The
+  login is simulated: the member ID and birth date stand in for the payer's member portal, checked
+  against the Patient Access server. The Provider Access and Payer-to-Payer APIs use SMART Backend
+  Services: the client sends a JWT signed with its own key (ES384 or RS384) to `/token`, and the
+  server checks it against the public key registered for the client, the audience, an expiry at
+  most five minutes ahead and a `jti` never seen before. Tokens are JWTs signed by the server
+  (RS256), valid five minutes, with the API's FHIR base as audience, so a token for one API is
+  refused by the other. Both APIs publish `.well-known/smart-configuration` and declare the
+  service in the CapabilityStatement.
+- **Clients.** `fhir/auth/clients.py` (`make fhir-clients`, after dbt) registers the member app (a
+  public client with its redirect URI), one backend client per provider with an attribution list
+  (acting for `Organization/<id>`), two other payers (each with its payer identifier) and one
+  administration client per API, and writes the backend clients' private keys to
+  `data/fhir_auth/keys/`. A client gets the scopes it asks for that its registration covers (a
+  narrower one included, such as `system/Patient.r` under `system/Patient.rs`).
+- **The member's app** sees one patient's Patient, Coverage and claims, and Organizations. A search
+  without the patient parameter gets it added; a search naming another member is refused; and
+  every answer is checked before it is sent, so a read of another member's claim by ID, or a page
+  of results, cannot leak either. No writes, history, operations or bulk export.
+- **A provider** reads and exports its own attribution list only, and reads Patient, Coverage and
+  claims of one member at a time: the search must name the member (`patient`, or `_id` for
+  Patient), who must be on the provider's list and have no Provider Access opt-out in force at that
+  moment. This closes the gap of the previous version, where only the bulk export applied the
+  opt-out. An opt-out recorded after the list was built applies to the next search.
+- **Another payer** calls `$bulk-member-match` and `$member-match`, where a consent counts only if
+  it names the calling payer as the recipient (otherwise the member is consent-constrained), and
+  reads, searches by its identifier and exports its own match groups. An export job, its status and
+  its files are visible only to the client that started it.
+- **Scopes.** Each interaction needs its permission on its type (`r` read, `s` search, `c u d`
+  writes); an export needs `r` on Group and on each type exported, `$bulk-member-match` `c` on
+  Group, `$member-match` `s` on Patient. Granular scopes (with a query) are not granted, since the
+  gateway does not apply their filter.
+- **Check.** `fhir/security_check.py` (`make fhir-security-check`) calls the authorization server
+  and both gateways with every kind of client, the requests that must succeed (compared with gold)
+  and the ones that must be refused.
+- **What is not done.** It is a demonstration, not an identity provider: clients are registered in
+  a file, the server's signing key and the codes and refresh tokens live in memory (a restart
+  invalidates them), the member login is not a real credential, there is no consent screen beyond
+  allow or deny, no token revocation or introspection endpoint, no dynamic client registration,
+  no `launch` from an EHR, and no TLS (everything is `http://localhost`). The gateway checks each
+  answer, so a search with `_summary=text` or `_elements` that leaves out the member is refused or
+  gets the member field added.
 
 ## The PBM feed and identity resolution
 

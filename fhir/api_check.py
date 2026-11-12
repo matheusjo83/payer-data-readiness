@@ -12,6 +12,11 @@ Every expected figure is computed from gold, independently of the server:
                IDs, and every exported resource must equal its gold resource
                apart from meta (the server sets versionId and lastUpdated).
 
+The server is reached through fhir-gateway-patient with the payer's
+administration client (admin-patient-access, system/*.rs): these checks are
+about the data the server holds; what a member's app may see is checked by
+make fhir-security-check.
+
 Writes data/fhir_api.json and exits with status 1 if any check fails.
 
 Usage (from the repository root, after make fhir-publish):
@@ -27,6 +32,8 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
+
+from smart_client import BackendClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
 import lakehouse  # noqa: E402
@@ -45,6 +52,7 @@ GOLD = {
     "Coverage": ["gold.fhir_coverage"],
     "ExplanationOfBenefit": ["gold.fhir_explanation_of_benefit", "gold.fhir_prior_authorization"],
 }
+ADMIN = BackendClient("admin-patient-access", "system/*.rs")
 ALL_EOB = ("(SELECT id, resource FROM gold.fhir_explanation_of_benefit "
            "UNION ALL SELECT id, resource FROM gold.fhir_prior_authorization)")
 
@@ -52,7 +60,8 @@ ALL_EOB = ("(SELECT id, resource FROM gold.fhir_explanation_of_benefit "
 def get(url: str, accept: str = "application/fhir+json", headers: dict | None = None):
     # no-cache: HAPI reuses the result of an identical search for a minute, so a
     # check run right after a change would otherwise see the old count.
-    req = urllib.request.Request(url, headers={"Accept": accept, "Cache-Control": "no-cache", **(headers or {})})
+    req = urllib.request.Request(url, headers={"Accept": accept, "Cache-Control": "no-cache", **ADMIN.headers(),
+                                               **(headers or {})})
     with urllib.request.urlopen(req, timeout=300) as resp:
         return resp.status, dict(resp.headers), resp.read()
 

@@ -1,9 +1,53 @@
-"""FHIR gateway for the Provider Access and Payer-to-Payer APIs (CMS-0057-F).
+"""FHIR gateway: SMART authorization for the FHIR APIs, and the PDex operations.
 
-Implements the Da Vinci PDex 2.1.0 operations that HAPI does not, in front of
-the HAPI server that holds the data those APIs share (fhir-server-provider: the
-claims without financial data, the prior authorizations, the attribution lists
-and the opt-outs). Every other request is passed through to that server.
+Two instances, each in front of one HAPI server, which only they can reach:
+
+  --api patient-access   (fhir-gateway-patient, port 8090, in front of
+                         fhir-server) the Patient Access API, for apps a member
+                         authorized (SMART App Launch, patient scopes);
+  --api provider-access  (fhir-gateway, port 8092, in front of
+                         fhir-server-provider) the Provider Access and
+                         Payer-to-Payer APIs (SMART Backend Services), with the
+                         Da Vinci PDex 2.1.0 operations HAPI does not implement.
+
+Authorization. Every request but GET metadata and
+.well-known/smart-configuration needs an access token from fhir-auth
+(fhir/auth/server.py) issued for this API (smart.py verifies it); without one,
+401. What the token allows depends on who it was issued to:
+
+  a member's app         (patient-access, patient/ scopes) reads and searches
+                         Patient, Coverage and ExplanationOfBenefit of its
+                         patient only: a search gets the patient parameter added
+                         (patient, or _id for Patient), one naming another member
+                         is refused, and every answer is checked before it is
+                         sent, so a read or a page with another member's data is
+                         refused too (403). Organization is readable. Nothing
+                         else: no writes, no history, no operations.
+  a provider             (provider-access, role provider, fhirUser
+                         Organization/<id>) reads its own attribution list
+                         (Group/attribution-<id>, or searched by its NPI),
+                         exports it with $davinci-data-export, and reads and
+                         searches Patient, Coverage and ExplanationOfBenefit of
+                         one member at a time: a search must name the member, who
+                         must be on the provider's attribution list and have no
+                         Provider Access opt-out in force, and the answer is
+                         checked the same way (403 otherwise). Organization is
+                         readable.
+  another payer          (provider-access, role payer, with its payer
+                         identifier) calls $bulk-member-match and $member-match,
+                         where a consent counts only if it names the calling
+                         payer as the recipient, and reads, searches (by its
+                         identifier) and exports its own match groups.
+  the administration     (role admin, system/*.cruds) everything the server
+  client                 offers: publishing, the checks' counts.
+
+Each request also needs the scope of its interaction (r read, s search, c u d
+writes) on its resource type; an export needs r on Group and on every type
+exported, $bulk-member-match c on Group, $member-match s on Patient. A
+$davinci-data-export job, its status and its files belong to the client that
+started it (404 for any other).
+
+The PDex operations (provider-access):
 
   POST [base]/Group/[id]/$davinci-data-export   (Da Vinci ATR 2.1.0, profiled by PDex)
       Bulk export of the members of an attribution list (Provider Access, a PDex
@@ -62,12 +106,13 @@ policy (all data): this payer does not label sensitive data, so a request for
 non-sensitive data only (#sensitive) cannot be complied with and the member is
 consent-constrained.
 
-No authorization (SMART Backend Services is a backlog item): any client can
-call these operations. Standard library only, so the container runs the
-official Python image with this file mounted.
+Python with PyJWT and cryptography (fhir/gateway/Dockerfile), this directory
+mounted.
 
 Usage:
-    python fhir/gateway/gateway.py [--port 8092] [--upstream http://localhost:8091/fhir]
+    python fhir/gateway/gateway.py --api provider-access [--port 8092] [--upstream http://fhir-server-provider:8080/fhir]
+        [--public-base http://localhost:8092/fhir] [--auth http://localhost:8093]
+        [--auth-public http://localhost:8093]
 """
 
 import argparse
@@ -75,6 +120,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import traceback
@@ -86,6 +132,9 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from smart import Token, Unauthorized, Verifier, security, smart_configuration  # noqa: E402
 
 PDEX = "http://hl7.org/fhir/us/davinci-pdex/"
 HREX = "http://hl7.org/fhir/us/davinci-hrex/"
@@ -116,9 +165,13 @@ JOBS_DIR = Path(tempfile.gettempdir()) / "fhir-gateway-jobs"
 class FhirError(Exception):
     """An error answered as an OperationOutcome."""
 
-    def __init__(self, status: int, message: str, code: str = "processing"):
+    def __init__(self, status: int, message: str, code: str = "processing", headers: dict | None = None):
         super().__init__(message)
-        self.status, self.message, self.code = status, message, code
+        self.status, self.message, self.code, self.headers = status, message, code, headers or {}
+
+
+def forbidden(message: str) -> FhirError:
+    return FhirError(403, message, "forbidden")
 
 
 def outcome(message: str, code: str = "processing", severity: str = "error") -> dict:
@@ -265,8 +318,9 @@ def export_parameters(query: dict, body: bytes) -> dict:
 
 
 class ExportJob:
-    def __init__(self, upstream: Upstream, group_id: str, params: dict, request_url: str):
+    def __init__(self, upstream: Upstream, group_id: str, params: dict, request_url: str, owner: str | None = None):
         self.id = uuid.uuid4().hex
+        self.owner = owner
         self.upstream, self.group_id, self.params, self.request_url = upstream, group_id, params, request_url
         self.status, self.progress, self.manifest, self.error = "running", "queued", None, None
         self.dir = JOBS_DIR / self.id
@@ -525,8 +579,9 @@ def match_member(upstream: Upstream, patient: dict, coverage: dict) -> tuple[str
     return None, "no member with these demographics"
 
 
-def consent_complies(consent: dict | None, day: date) -> tuple[bool, str, dict | None]:
-    """(complies, reason, recipient identifier)."""
+def consent_complies(consent: dict | None, day: date, caller: dict | None = None) -> tuple[bool, str, dict | None]:
+    """(complies, reason, recipient identifier). With caller (the requesting payer's
+    identifier, from its access token), the consent must name it as the recipient."""
     if not consent or consent.get("resourceType") != "Consent":
         return False, "no consent", None
     provision = consent.get("provision") or {}
@@ -548,6 +603,8 @@ def consent_complies(consent: dict | None, day: date) -> tuple[bool, str, dict |
         return False, "the consent does not name this payer as the source", recipient
     if not recipient:
         return False, "the consent names no recipient", recipient
+    if caller and not same_identifier(recipient, caller):
+        return False, "the consent names another recipient than the requesting payer", recipient
     if POLICY_SENSITIVE in policies:
         return False, "only non-sensitive data was consented, and this payer does not label sensitive data", recipient
     if POLICY_REGULAR not in policies:
@@ -597,7 +654,7 @@ def result_group(code: str, display: str, profile: str, recipient: dict | None, 
     return group
 
 
-def bulk_member_match(upstream: Upstream, body: bytes) -> dict:
+def bulk_member_match(upstream: Upstream, body: bytes, caller: dict | None = None) -> dict:
     try:
         params = json.loads(body or b"{}")
     except json.JSONDecodeError as e:
@@ -611,7 +668,7 @@ def bulk_member_match(upstream: Upstream, body: bytes) -> dict:
         patient, coverage = bundle_part(parts, "MemberPatient"), bundle_part(parts, "CoverageToMatch")
         if not patient or not coverage:
             raise FhirError(400, "Each MemberBundle needs MemberPatient and CoverageToMatch", "required")
-        complies, consent_reason, recipient = consent_complies(bundle_part(parts, "Consent"), day)
+        complies, consent_reason, recipient = consent_complies(bundle_part(parts, "Consent"), day, caller)
         if recipient:
             recipients.append(recipient)
         our_id, reason = match_member(upstream, patient, coverage)
@@ -621,8 +678,9 @@ def bulk_member_match(upstream: Upstream, body: bytes) -> dict:
             constrained.append((patient, None, consent_reason))
         else:
             matched.append((patient, our_id, reason))
-    # The requesting payer: the recipient the consents name (one request, one requester).
-    requester = recipients[0] if recipients and all(r == recipients[0] for r in recipients) else None
+    # The requesting payer: the caller (its access token), or without one the
+    # recipient the consents name (one request, one requester).
+    requester = caller or (recipients[0] if recipients and all(r == recipients[0] for r in recipients) else None)
     match_group = result_group("match", "Matched", MATCH_GROUP, requester, matched)
     status, stored = upstream.json("PUT", f"Group/{match_group['id']}", match_group)
     if status not in (200, 201):
@@ -640,7 +698,7 @@ def bulk_member_match(upstream: Upstream, body: bytes) -> dict:
             "parameter": out}
 
 
-def member_match(upstream: Upstream, body: bytes) -> dict:
+def member_match(upstream: Upstream, body: bytes, caller: dict | None = None) -> dict:
     try:
         params = json.loads(body or b"{}")
     except json.JSONDecodeError as e:
@@ -654,7 +712,7 @@ def member_match(upstream: Upstream, body: bytes) -> dict:
         raise FhirError(422, f"No unique match: {reason}", "not-found")
     consent = bundle_part(parts, "Consent")
     if consent is not None:
-        complies, consent_reason, _ = consent_complies(consent, today())
+        complies, consent_reason, _ = consent_complies(consent, today(), caller)
         if not complies:
             raise FhirError(422, f"The consent cannot be complied with: {consent_reason}", "business-rule")
     return {"resourceType": "Parameters", "parameter": [
@@ -664,10 +722,14 @@ def member_match(upstream: Upstream, body: bytes) -> dict:
         {"name": "MemberId", "valueReference": {"reference": f"Patient/{our_id}"}}]}
 
 
-def capability_statement(upstream: Upstream) -> dict:
+def capability_statement(upstream: Upstream, api: str, auth_public: str) -> dict:
     status, cs = upstream.json("GET", "metadata")
     if status != 200:
         raise FhirError(502, f"Upstream metadata failed with HTTP {status}")
+    for rest in cs.get("rest", []):
+        rest["security"] = security(auth_public, backend=api == "provider-access")
+    if api == "patient-access":
+        return cs
     cs["instantiates"] = [PDEX + "CapabilityStatement/pdex-provider-access-server",
                           PDEX + "CapabilityStatement/pdex-payer-access-server"]
     for rest in cs.get("rest", []):
@@ -685,17 +747,102 @@ def capability_statement(upstream: Upstream) -> dict:
     return cs
 
 
+# --- Authorization ----------------------------------------------------------------
+
+COMPARTMENT_TYPES = ("Patient", "Coverage", "ExplanationOfBenefit")
+# The search parameters that name the member, by type.
+PATIENT_PARAMS = {"Patient": ("_id",), "Coverage": ("patient", "beneficiary"), "ExplanationOfBenefit": ("patient",)}
+TYPE_RE = re.compile(r"^[A-Z][A-Za-z]+$")
+ID_RE = re.compile(r"^[A-Za-z0-9\-.]{1,64}$")
+
+
+def interaction(path: str, method: str, query: dict) -> tuple[str, str | None, str | None]:
+    """(interaction, resource type, id) of a REST request; 'other' for anything else."""
+    parts = path.split("/") if path else []
+    if not parts:
+        if method == "GET" and "_getpages" in query:
+            return "page", None, None
+        return ("transaction" if method == "POST" else "other"), None, None
+    if not TYPE_RE.match(parts[0]):
+        return "other", None, None
+    rtype = parts[0]
+    if len(parts) == 1:
+        return {"GET": "search", "POST": "create"}.get(method, "other"), rtype, None
+    if not ID_RE.match(parts[1]):
+        return "other", rtype, None
+    if len(parts) == 2:
+        return {"GET": "read", "PUT": "update", "PATCH": "update", "DELETE": "delete"}.get(method, "other"), rtype, \
+            parts[1]
+    if len(parts) == 4 and parts[2] == "_history" and method == "GET":
+        return "vread", rtype, parts[1]
+    return "other", rtype, parts[1]
+
+
+def named_patients(rtype: str, query: dict) -> set[str]:
+    """The members a search names (Patient ids), through the patient parameter of its type."""
+    names, found = PATIENT_PARAMS[rtype], set()
+    for key, values in query.items():
+        base = re.split(r"[:.]", key, maxsplit=1)[0]
+        if base not in names:
+            continue
+        if key != base:
+            raise forbidden(f"Modifiers and chains on {base} are not allowed: name the member directly")
+        for value in values:
+            for v in value.split(","):
+                v = v.strip()
+                found.add(v.removeprefix("Patient/") if rtype != "Patient" or base != "_id" else v)
+    return found
+
+
+def keep_member_field(rtype: str, query: dict) -> dict:
+    """With _elements, also ask for the element that names the member, so the answer can be checked."""
+    if rtype in ("Coverage", "ExplanationOfBenefit") and query.get("_elements"):
+        field = "beneficiary" if rtype == "Coverage" else "patient"
+        return {**query, "_elements": [",".join([*query["_elements"], field])]}
+    return query
+
+
+def check_answer(data: bytes, allowed: set[str], allowed_types: tuple = ("Organization",)) -> None:
+    """Refuse (403) an answer that holds a resource outside what the caller may see:
+    a compartment resource of a member not in `allowed` ('Patient/<id>'), or a type
+    that is neither a compartment type nor in allowed_types."""
+    try:
+        body = json.loads(data)
+    except json.JSONDecodeError as e:
+        raise forbidden("The answer could not be checked") from e
+    if body.get("resourceType") == "Bundle":
+        resources = [e["resource"] for e in body.get("entry", []) if "resource" in e]
+    else:
+        resources = [body]
+    for r in resources:
+        rtype = r.get("resourceType")
+        if rtype in COMPARTMENT_TYPES:
+            if patient_of(r) not in allowed:
+                raise forbidden(f"The answer holds data of a member this client may not see ({rtype}/{r.get('id')})")
+        elif rtype not in (*allowed_types, "OperationOutcome"):
+            raise forbidden(f"The answer holds a {rtype}, which this client may not see")
+
+
+def require(token: Token, rtype: str, permission: str, context: str = "system") -> None:
+    if not token.can(context, rtype, permission):
+        raise forbidden(f"The access token has no scope allowing '{permission}' on {rtype}")
+
+
 # --- HTTP ----------------------------------------------------------------------------
 
 JOBS: dict[str, ExportJob] = {}
 EXPORT_RE = re.compile(r"^Group/([A-Za-z0-9\-.]{1,64})/\$davinci-data-export$")
 BLOCKED_RE = re.compile(r"(^|/)\$export$")
+HAPI_EXPORT_RE = re.compile(r"(^|/)\$export(-poll-status)?$|^Binary/")
 PASSTHROUGH_HEADERS = ("Accept", "Content-Type", "Prefer", "Cache-Control", "If-Match", "If-None-Exist")
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "payer-fhir-gateway"
     upstream: Upstream = None
+    api: str = "provider-access"
+    verifier: Verifier = None
+    auth_public: str = ""
 
     def public_base(self) -> str:
         return f"http://{self.headers.get('Host', 'localhost')}/fhir"
@@ -713,8 +860,10 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
 
     def body(self) -> bytes:
-        length = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(length) if length else b""
+        if not hasattr(self, "_body"):
+            length = int(self.headers.get("Content-Length") or 0)
+            self._body = self.rfile.read(length) if length else b""
+        return self._body
 
     def handle_any(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
@@ -725,50 +874,229 @@ class Handler(BaseHTTPRequestHandler):
         method = self.command
 
         if path == "metadata" and method == "GET":
-            return self.send(200, capability_statement(self.upstream))
-        if (m := EXPORT_RE.match(path)) and method in ("POST", "GET"):
-            if method == "GET":
-                raise FhirError(405, "$davinci-data-export SHALL be submitted with POST (PDex)", "not-supported")
-            if "respond-async" not in (self.headers.get("Prefer") or ""):
-                raise FhirError(400, "$davinci-data-export requires the header Prefer: respond-async", "invalid")
-            job = ExportJob(self.upstream, m.group(1), export_parameters(query, self.body()),
-                            f"{self.public_base()}/{path}" + (f"?{parsed.query}" if parsed.query else ""))
-            job.prepare()
-            JOBS[job.id] = job
-            threading.Thread(target=job.run, args=(self.public_base(),), daemon=True).start()
-            return self.send(202, outcome("Export accepted", "informational", "information"),
-                             headers={"Content-Location": f"{self.public_base()}/$export-status/{job.id}"})
-        if path.startswith("$export-status/"):
-            job = JOBS.get(path.split("/", 1)[1])
-            if job is None:
-                raise FhirError(404, "Unknown export job", "not-found")
-            if method == "DELETE":
-                job.cancelled = True
-                JOBS.pop(job.id, None)
-                shutil.rmtree(job.dir, ignore_errors=True)
-                return self.send(202, outcome("Export cancelled", "informational", "information"))
-            if job.status == "running":
-                return self.send(202, b"", headers={"X-Progress": job.progress, "Retry-After": "2"})
-            if job.status == "failed":
-                status, oo = job.error
-                return self.send(status, oo)
-            return self.send(200, job.manifest, "application/json",
-                             headers={"Expires": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
-                                 "%a, %d %b %Y %H:%M:%S GMT")})
-        if path.startswith("$export-file/") and method == "GET":
-            _, job_id, name = (path.split("/") + ["", ""])[:3]
-            job = JOBS.get(job_id)
-            if job is None or not re.fullmatch(r"[A-Za-z]+\.ndjson", name) or not (job.dir / name).exists():
-                raise FhirError(404, "Unknown export file", "not-found")
-            return self.send(200, (job.dir / name).read_bytes(), "application/fhir+ndjson")
-        if path == "Group/$bulk-member-match" and method == "POST":
-            return self.send(200, bulk_member_match(self.upstream, self.body()))
-        if path == "Patient/$member-match" and method == "POST":
-            return self.send(200, member_match(self.upstream, self.body()))
+            return self.send(200, capability_statement(self.upstream, self.api, self.auth_public))
+        if path == ".well-known/smart-configuration" and method == "GET":
+            return self.send(200, smart_configuration(self.auth_public, backend=self.api == "provider-access"),
+                             "application/json")
+        try:
+            token = self.verifier.verify(self.headers.get("Authorization"))
+        except Unauthorized as e:
+            raise FhirError(401, str(e), "login", {"WWW-Authenticate": f'Bearer realm="{self.api}", '
+                                                                      f'error="invalid_token"'}) from e
+        if token.claims.get("api") != self.api:
+            raise FhirError(401, f"The access token was not issued for the {self.api} API", "login")
+        self.token = token
+
+        if path.startswith("$export-status/") or path.startswith("$export-file/"):
+            return self.export_job(path, method)
+        if self.api == "patient-access":
+            if token.role == "admin":
+                require(token, "*", "r")
+                return self.passthrough(path, parsed.query)
+            return self.patient_access(token, path, query, method)
         if BLOCKED_RE.search(path):
             raise FhirError(400, "Bulk $export is not offered here: it would bypass the opt-out check. Use "
                                  "POST Group/[id]/$davinci-data-export", "not-supported")
-        return self.passthrough(path, parsed.query)
+        if (m := EXPORT_RE.match(path)) and method in ("POST", "GET"):
+            return self.start_export(m.group(1), path, parsed, query, method)
+        if path == "Group/$bulk-member-match" and method == "POST":
+            if token.role not in ("payer", "admin"):
+                raise forbidden("$bulk-member-match is for other payers (Payer-to-Payer)")
+            require(token, "Group", "c")
+            return self.send(200, bulk_member_match(self.upstream, self.body(), token.payer_identifier))
+        if path == "Patient/$member-match" and method == "POST":
+            if token.role not in ("payer", "admin"):
+                raise forbidden("$member-match is for other payers (Payer-to-Payer)")
+            require(token, "Patient", "s")
+            return self.send(200, member_match(self.upstream, self.body(), token.payer_identifier))
+        if token.role == "admin":
+            require(token, "*", "r")
+            return self.passthrough(path, parsed.query)
+        if token.role == "provider":
+            return self.provider_access(token, path, query, method)
+        if token.role == "payer":
+            return self.payer_access(token, path, query, method)
+        raise forbidden("This client has no role on this API")
+
+    # --- per client ---------------------------------------------------------------
+
+    def rest_scope(self, token: Token, kind: str, rtype: str | None, context: str = "system") -> None:
+        permission = {"read": "r", "vread": "r", "search": "s"}.get(kind)
+        if permission is None or rtype is None:
+            raise forbidden(f"This client may only read and search (not {self.command} {kind})")
+        require(token, rtype, permission, context)
+
+    def patient_access(self, token: Token, path: str, query: dict, method: str) -> None:
+        """A member's app: its patient's compartment, and Organizations."""
+        if not token.patient:
+            raise forbidden("The access token has no patient context (launch/patient)")
+        if HAPI_EXPORT_RE.search(path):
+            raise forbidden("Bulk export is not offered to apps")
+        kind, rtype, _ = interaction(path, method, query)
+        allowed = {f"Patient/{token.patient}"}
+        if kind == "page":
+            if not any("s" in perms for (ctx, _), perms in token.scopes.items() if ctx == "patient"):
+                raise forbidden("The access token has no search scope")
+        else:
+            if rtype not in (*COMPARTMENT_TYPES, "Organization"):
+                raise forbidden(f"{rtype or 'This request'} is not offered to apps")
+            self.rest_scope(token, kind, rtype, "patient")
+            if kind == "search" and rtype in COMPARTMENT_TYPES:
+                named = named_patients(rtype, query)
+                if named - {token.patient}:
+                    raise forbidden("The search names another member than the one who authorized the app")
+                if not named:
+                    query = {**query, PATIENT_PARAMS[rtype][0]: [token.patient if rtype == "Patient"
+                                                                 else f"Patient/{token.patient}"]}
+            query = keep_member_field(rtype, query)
+        self.forward_checked(path, query, allowed)
+
+    def provider_scope(self, token: Token) -> tuple[str, dict, set[str]]:
+        """The provider's attribution list (its Group id and resource) and the members
+        it may see: on the list, and without a Provider Access opt-out in force."""
+        provider = (token.fhir_user or "").removeprefix("Organization/")
+        group_id = f"attribution-{provider}"
+        group = self.upstream.read("Group", group_id) if provider else None
+        if group is None or group_kind(group) != "provider":
+            raise forbidden("This provider has no attribution list")
+        members = {m["entity"]["reference"] for m in group.get("member", [])
+                   if not m.get("inactive") and m.get("entity", {}).get("reference", "").startswith("Patient/")}
+        return group_id, group, members - opted_out_members(self.upstream, today())
+
+    def provider_access(self, token: Token, path: str, query: dict, method: str) -> None:
+        kind, rtype, rid = interaction(path, method, query)
+        group_id, group, allowed = self.provider_scope(token)
+        if rtype == "Group":
+            self.rest_scope(token, kind, rtype)
+            if kind in ("read", "vread") and rid != group_id:
+                raise forbidden("A provider may read only its own attribution list")
+            if kind == "search":
+                npis = {f"{i.get('system')}|{i.get('value')}" for i in group.get("identifier", [])}
+                ids = [v for k, vs in query.items() if k == "_id" for v in vs]
+                identifiers = [v for k, vs in query.items() if k == "identifier" for v in vs]
+                if not (ids == [group_id] or (identifiers and all(v in npis for v in identifiers))):
+                    raise forbidden("A provider may search only its own attribution list (by its NPI or id)")
+            return self.forward_checked(path, query, set(), ("Group", "Organization"), group_ids={group_id})
+        if rtype == "Organization":
+            self.rest_scope(token, kind, rtype)
+            return self.forward_checked(path, query, set())
+        if kind == "page":
+            return self.forward_checked(path, query, allowed, ("Group", "Organization"), group_ids={group_id})
+        if rtype not in COMPARTMENT_TYPES:
+            raise forbidden(f"{rtype or 'This request'} is not offered to providers")
+        self.rest_scope(token, kind, rtype)
+        if kind == "search":
+            named = named_patients(rtype, query)
+            if len(named) != 1:
+                raise forbidden("A provider's search must name one member (patient, or _id for Patient)")
+            member = f"Patient/{next(iter(named))}"
+            if member not in allowed:
+                raise forbidden(f"{member} is not on this provider's attribution list or has opted out of "
+                                "Provider Access")
+            return self.forward_checked(path, keep_member_field(rtype, query), {member})
+        return self.forward_checked(path, keep_member_field(rtype, query), allowed)
+
+    def payer_access(self, token: Token, path: str, query: dict, method: str) -> None:
+        kind, rtype, rid = interaction(path, method, query)
+        if rtype != "Group":
+            raise forbidden("Another payer may only match members and export its match groups")
+        self.rest_scope(token, kind, rtype)
+        caller = token.payer_identifier or {}
+        if kind == "search":
+            wanted = f"{caller.get('system')}|{caller.get('value')}"
+            if [v for k, vs in query.items() if k == "identifier" for v in vs] != [wanted]:
+                raise forbidden("A payer may search only its own match groups (identifier=<its payer identifier>)")
+        status, headers, data = self.fetch(path, query)
+        if status == 200:
+            body = json.loads(data)
+            groups = [e["resource"] for e in body.get("entry", [])] if body.get("resourceType") == "Bundle" else [body]
+            for g in groups:
+                # A search is limited to the caller's identifier above (and _elements may
+                # leave out what identifies a match group); a read is checked in full.
+                if g.get("resourceType") == "Group" and kind != "search" and not (
+                        group_kind(g) == "payertopayer"
+                        and any(same_identifier(i, caller) for i in g.get("identifier", []))):
+                    raise forbidden("This match group belongs to another payer")
+                if g.get("resourceType") not in ("Group", "OperationOutcome"):
+                    raise forbidden(f"The answer holds a {g.get('resourceType')}, which this client may not see")
+        self.send(status, data, headers.get("Content-Type", "application/fhir+json"))
+
+    # --- $davinci-data-export -------------------------------------------------------
+
+    def start_export(self, group_id: str, path: str, parsed, query: dict, method: str) -> None:
+        token = self.token
+        if method == "GET":
+            raise FhirError(405, "$davinci-data-export SHALL be submitted with POST (PDex)", "not-supported")
+        if "respond-async" not in (self.headers.get("Prefer") or ""):
+            raise FhirError(400, "$davinci-data-export requires the header Prefer: respond-async", "invalid")
+        require(token, "Group", "r")
+        if token.role == "provider":
+            own, _, _ = self.provider_scope(token)
+            if group_id != own:
+                raise forbidden("A provider may export only its own attribution list")
+        elif token.role == "payer":
+            group = self.upstream.read("Group", group_id)
+            if group is None or group_kind(group) != "payertopayer" or not any(
+                    same_identifier(i, token.payer_identifier or {}) for i in group.get("identifier", [])):
+                raise forbidden("A payer may export only its own match groups")
+        elif token.role != "admin":
+            raise forbidden("This client may not export")
+        job = ExportJob(self.upstream, group_id, export_parameters(query, self.body()),
+                        f"{self.public_base()}/{path}" + (f"?{parsed.query}" if parsed.query else ""),
+                        token.client_id)
+        job.prepare()
+        for rtype in job.types:
+            require(token, rtype, "r")
+        JOBS[job.id] = job
+        threading.Thread(target=job.run, args=(self.public_base(),), daemon=True).start()
+        return self.send(202, outcome("Export accepted", "informational", "information"),
+                         headers={"Content-Location": f"{self.public_base()}/$export-status/{job.id}"})
+
+    def export_job(self, path: str, method: str) -> None:
+        kind, job_id, name = (path.split("/") + ["", ""])[:3]
+        job = JOBS.get(job_id)
+        if job is None or (job.owner != self.token.client_id and self.token.role != "admin"):
+            raise FhirError(404, "Unknown export job", "not-found")
+        if kind == "$export-file":
+            if method != "GET" or not re.fullmatch(r"[A-Za-z]+\.ndjson", name) or not (job.dir / name).exists():
+                raise FhirError(404, "Unknown export file", "not-found")
+            return self.send(200, (job.dir / name).read_bytes(), "application/fhir+ndjson")
+        if method == "DELETE":
+            job.cancelled = True
+            JOBS.pop(job.id, None)
+            shutil.rmtree(job.dir, ignore_errors=True)
+            return self.send(202, outcome("Export cancelled", "informational", "information"))
+        if job.status == "running":
+            return self.send(202, b"", headers={"X-Progress": job.progress, "Retry-After": "2"})
+        if job.status == "failed":
+            status, oo = job.error
+            return self.send(status, oo)
+        return self.send(200, job.manifest, "application/json",
+                         headers={"Expires": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
+                             "%a, %d %b %Y %H:%M:%S GMT")})
+
+    # --- upstream -------------------------------------------------------------------
+
+    def fetch(self, path: str, query: dict) -> tuple[int, dict, bytes]:
+        """A GET to the upstream server, with its URLs rewritten to this gateway."""
+        headers = {k: self.headers[k] for k in PASSTHROUGH_HEADERS if self.headers.get(k)}
+        qs = urllib.parse.urlencode(query, doseq=True)
+        status, resp_headers, data = self.upstream.request("GET", f"{path}?{qs}" if qs else path, None, headers)
+        return status, resp_headers, data.replace(self.upstream.base.encode(), self.public_base().encode())
+
+    def forward_checked(self, path: str, query: dict, allowed: set[str], allowed_types: tuple = ("Organization",),
+                        group_ids: set[str] = frozenset()) -> None:
+        """Forward a read or search and check the answer before sending it."""
+        status, headers, data = self.fetch(path, query)
+        if status == 200:
+            check_answer(data, allowed, allowed_types)
+            if group_ids:
+                body = json.loads(data)
+                items = [e["resource"] for e in body.get("entry", [])] if body.get("resourceType") == "Bundle" \
+                    else [body]
+                if any(r.get("resourceType") == "Group" and r.get("id") not in group_ids for r in items):
+                    raise forbidden("The answer holds another provider's attribution list")
+        self.send(status, data, headers.get("Content-Type", "application/fhir+json"))
 
     def passthrough(self, path: str, query: str) -> None:
         headers = {k: self.headers[k] for k in PASSTHROUGH_HEADERS if self.headers.get(k)}
@@ -784,7 +1112,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.handle_any()
         except FhirError as e:
-            self.send(e.status, outcome(e.message, e.code))
+            self.send(e.status, outcome(e.message, e.code), headers=e.headers)
         except Exception as e:  # noqa: BLE001 - answered as an OperationOutcome
             traceback.print_exc()
             self.send(500, outcome(f"Gateway error: {e}", "exception"))
@@ -797,13 +1125,24 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--api", choices=["patient-access", "provider-access"],
+                    default=os.environ.get("GATEWAY_API", "provider-access"))
     ap.add_argument("--port", type=int, default=8092)
     ap.add_argument("--upstream", default=os.environ.get("UPSTREAM_FHIR_URL", "http://localhost:8091/fhir"))
+    ap.add_argument("--public-base", default=os.environ.get("PUBLIC_BASE_URL", "http://localhost:8092/fhir"),
+                    help="this gateway's FHIR base, the audience its access tokens must have")
+    ap.add_argument("--auth", default=os.environ.get("AUTH_INTERNAL_URL", "http://localhost:8093"),
+                    help="the authorization server, as this gateway reaches it (for its keys)")
+    ap.add_argument("--auth-public", default=os.environ.get("AUTH_PUBLIC_URL", "http://localhost:8093"),
+                    help="the authorization server, as clients reach it (the token issuer)")
     args = ap.parse_args()
     shutil.rmtree(JOBS_DIR, ignore_errors=True)
     Handler.upstream = Upstream(args.upstream)
+    Handler.api = args.api
+    Handler.auth_public = args.auth_public.rstrip("/")
+    Handler.verifier = Verifier(f"{args.auth.rstrip('/')}/jwks", args.auth_public, args.public_base)
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"FHIR gateway on port {args.port}, upstream {args.upstream}", flush=True)
+    print(f"FHIR gateway ({args.api}) on port {args.port}, upstream {args.upstream}", flush=True)
     server.serve_forever()
 
 

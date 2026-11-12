@@ -8,7 +8,8 @@
 # published to a HAPI FHIR server and checked through its API (searches, Bulk
 # $export), and the data of the Provider Access and Payer-to-Payer APIs (claims
 # without financial data, attribution lists, opt-outs) to a second one, checked
-# through the gateway that implements the Da Vinci PDex operations. Last, legacy
+# through the gateway that implements the Da Vinci PDex operations. Both APIs
+# need SMART access tokens (fhir-auth); the authorization is checked too. Last, legacy
 # changes are streamed and applied incrementally, and the
 # current state is checked against a full rebuild and against Postgres. The
 # lakehouse is DuckLake: a catalog in Postgres (lakehouse-catalog), Parquet data.
@@ -87,6 +88,7 @@ jobs:
         run: make up
 
       # Started early: the servers take a while to boot, and publishing waits for them.
+      # Also builds the image of the gateways and the authorization server.
       - name: Start FHIR servers
         run: make fhir-up
 
@@ -127,6 +129,9 @@ jobs:
       - name: Provider Access and Payer-to-Payer API checks (PDex operations)
         run: make fhir-provider-api-check
 
+      - name: API security checks (SMART on FHIR, Backend Services)
+        run: make fhir-security-check
+
       # One HL7 validator run for the four samples (CARIN Blue Button, PDex prior
       # authorizations, Provider Access data, Payer-to-Payer messages): loading the
       # packages takes minutes, validating them seconds. After the API checks,
@@ -162,6 +167,7 @@ jobs:
             data/fhir_api.json
             data/fhir_provider_api.json
             data/fhir_provider_api/messages/
+            data/fhir_security.json
             data/cdc_reconcile.json
             data/dbt_run_results.json
             dbt/target/run_results.json

@@ -260,4 +260,6 @@ platform.
   *In this repo:* dbt docs (`make docs`).
 - [ ] **Access control, audit logging, retention and consent,** including SMART on FHIR
   authorization on the API, so that each member reads only their own data.
-  **Not covered here** (the FHIR server has no authentication).
+  *In this repo:* SMART App Launch for the Patient Access API and SMART Backend Services for the
+  Provider Access and Payer-to-Payer APIs, enforced in the gateways (`make fhir-security-check`);
+  audit logging and retention are not covered.
