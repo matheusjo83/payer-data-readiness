@@ -12,6 +12,7 @@
 # changes are streamed and applied incrementally, and the
 # current state is checked against a full rebuild and against Postgres. The
 # lakehouse is DuckLake: a catalog in Postgres (lakehouse-catalog), Parquet data.
+# The four validator samples run in one validator call, after the API checks.
 name: CI
 
 on:
@@ -107,20 +108,15 @@ jobs:
       - name: Replication slot drill
         run: make slot-drill
 
+      # cdc-check runs dbt again on a selection, which overwrites run_results.json:
+      # the full build's results are kept apart for the reports.
       - name: dbt build
-        run: make dbt
+        run: |
+          make dbt
+          cp dbt/target/run_results.json data/dbt_run_results.json
 
       - name: SQL on FHIR conformance
         run: make conformance
-
-      - name: FHIR validation (CARIN Blue Button 2.1.0, tx.fhir.org)
-        run: make fhir-validate-carin
-
-      - name: FHIR validation (Da Vinci PDex 2.1.0 prior authorizations, tx.fhir.org)
-        run: make fhir-validate-pdex
-
-      - name: FHIR validation (Provider Access data, CARIN Basis and Da Vinci PDex 2.1.0, tx.fhir.org)
-        run: make fhir-validate-provider
 
       - name: Publish to the FHIR servers
         run: make fhir-publish
@@ -131,8 +127,12 @@ jobs:
       - name: Provider Access and Payer-to-Payer API checks (PDex operations)
         run: make fhir-provider-api-check
 
-      - name: FHIR validation (Payer-to-Payer messages, Da Vinci PDex 2.1.0, tx.fhir.org)
-        run: make fhir-validate-p2p
+      # One HL7 validator run for the four samples (CARIN Blue Button, PDex prior
+      # authorizations, Provider Access data, Payer-to-Payer messages): loading the
+      # packages takes minutes, validating them seconds. After the API checks,
+      # which write the Payer-to-Payer messages; one summary per sample.
+      - name: FHIR validation (CARIN Blue Button 2.1.0 and Da Vinci PDex 2.1.0, tx.fhir.org)
+        run: make fhir-validate-all
 
       # Last, so the steps above use the data as generated: simulated legacy
       # changes, a CDC sync, the incremental dbt run, parity with a full rebuild
@@ -163,6 +163,7 @@ jobs:
             data/fhir_provider_api.json
             data/fhir_provider_api/messages/
             data/cdc_reconcile.json
+            data/dbt_run_results.json
             dbt/target/run_results.json
 
       - name: Stop containers

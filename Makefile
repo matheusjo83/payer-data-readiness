@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-up fhir-publish fhir-api-check fhir-provider-api-check docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-all fhir-up fhir-publish fhir-api-check fhir-provider-api-check docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
 	docker compose up -d --build --wait legacy-db lakehouse-catalog
@@ -88,6 +88,9 @@ fhir-validate-provider: ## Validate the Provider Access / Payer-to-Payer data: c
 
 fhir-validate-p2p: ## Validate the Payer-to-Payer $$bulk-member-match request and response saved by fhir-provider-api-check (PDex 2.1.0, Java)
 	$(PY) fhir/validate.py --ig payer-to-payer --top 60 --tx https://tx.fhir.org
+
+fhir-validate-all: ## The four validations above in one HL7 validator run (loading the packages takes most of a run), one summary per mode; after fhir-provider-api-check (Java)
+	$(PY) fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer --top 60 --tx https://tx.fhir.org
 
 fhir-up:   ## Start the HAPI FHIR servers empty (recreated each time) and the gateway: Patient Access at http://localhost:8090/fhir, Provider Access and Payer-to-Payer at http://localhost:8092/fhir
 	docker compose --profile api up -d --force-recreate fhir-server fhir-server-provider fhir-gateway

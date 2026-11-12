@@ -25,7 +25,8 @@ server:
 
 Each batch is a FHIR transaction of PUTs (update by id), so a run either loads a
 batch completely or not at all, and publishing again replaces the resources
-instead of duplicating them. `make fhir-up` recreates the server empty, so a
+instead of duplicating them. Both servers are loaded in parallel, one thread
+each. `make fhir-up` recreates the server empty, so a
 resource removed from gold does not linger. Writes data/fhir_publish.json
 (patient-access) and data/fhir_publish_provider.json (provider-access).
 
@@ -35,6 +36,7 @@ Usage (from the repository root, the servers running):
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor
 import os
 import sys
 import time
@@ -144,9 +146,15 @@ def main() -> None:
     ap.add_argument("--server", choices=["all", *SERVERS], default="all", help="which server to load")
     ap.add_argument("--batch", type=int, default=500, help="resources per transaction")
     args = ap.parse_args()
-    for name, (base, models, report_path) in SERVERS.items():
-        if args.server in ("all", name):
-            publish(name, base, models, report_path, args.batch)
+    chosen = [(name, *spec) for name, spec in SERVERS.items() if args.server in ("all", name)]
+    # The servers are loaded at the same time: each waits mostly on its own HAPI,
+    # and each thread opens its own lakehouse connection. A failure on either one
+    # is raised here, after both have finished.
+    with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
+        futures = [pool.submit(publish, name, base, models, report_path, args.batch)
+                   for name, base, models, report_path in chosen]
+    for future in futures:
+        future.result()
 
 
 if __name__ == "__main__":

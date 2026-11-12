@@ -154,6 +154,7 @@ make fhir-publish         # load the gold FHIR resources into both
 make fhir-api-check       # check the Patient Access server against gold: counts, CARIN/PDex searches, Bulk $export
 make fhir-provider-api-check  # check the gateway against gold: attribution, $davinci-data-export, opt-outs, $bulk-member-match
 make fhir-validate-p2p    # validate the Payer-to-Payer request and response the check saved (PDex 2.1.0)
+make fhir-validate-all    # fhir-validate-carin, -pdex, -provider and -p2p in one validator run, as CI does
 ```
 
 The legacy schema gained columns in Phase 6, `pa_req.req_amt` with the FHIR API and the table
@@ -181,8 +182,9 @@ result against a full rebuild and against Postgres.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up fhir-up seed pbm synthea ingest
-slot-drill dbt conformance fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-publish
-fhir-api-check fhir-provider-api-check fhir-validate-p2p cdc-check` on a clean runner. The run fails
+slot-drill dbt conformance fhir-publish fhir-api-check fhir-provider-api-check fhir-validate-all
+cdc-check` on a clean runner (`fhir-validate-all` runs the four `fhir-validate-*` samples with IGs
+in one HL7 validator run). The run fails
 if the slot drill fails, if a model or data test fails, if any shareable SQL on FHIR test fails, if
 the HL7 validator reports an error against the CARIN Blue Button or PDex profiles in the samples or
 the Payer-to-Payer messages, if a check of a FHIR API against gold fails, or if the incremental

@@ -59,6 +59,8 @@ Usage (from the repository root, Java 17+ required):
     python fhir/validate.py --ig carin-bb   # CARIN Blue Button 2.1.0
     python fhir/validate.py --ig carin-bb --tx https://tx.fhir.org   # with terminology
     python fhir/validate.py --ig pdex --tx https://tx.fhir.org        # PDex prior authorizations
+    python fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer --tx https://tx.fhir.org
+                                            # all four in one validator run (make fhir-validate-all)
 
 Exits with status 1 if any sample has an error, if a sample is empty, or (with
 --ig) if a sampled resource references a resource that is not exported.
@@ -286,14 +288,13 @@ def bundle_with_references(con, focal: dict) -> tuple[dict, list[str]]:
     return bundle, unresolved
 
 
-def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict]:
+def export_sample(sample: int, samples: dict, bundles: bool, input_dir: Path) -> tuple[dict, dict]:
     """Write each sample as one file per resource, named <label>-<id>.json.
 
     The label is a resource type, or ExplanationOfBenefit.<sample> for a sample
     restricted by a condition (a declared profile, or the PBM claims). With bundles, each file is a Bundle
     holding the resource and what it references; without, meta.profile is removed.
     """
-    input_dir = OUT_DIR / "input"
     shutil.rmtree(input_dir, ignore_errors=True)
     input_dir.mkdir(parents=True)
     con = lakehouse.connect(read_only=True)
@@ -320,9 +321,8 @@ def export_sample(sample: int, samples: dict, bundles: bool) -> tuple[dict, dict
     return counts, unresolved
 
 
-def copy_messages(files: dict) -> tuple[dict, dict]:
+def copy_messages(files: dict, input_dir: Path) -> tuple[dict, dict]:
     """The Payer-to-Payer messages, as they are (they declare their PDex profiles)."""
-    input_dir = OUT_DIR / "input"
     shutil.rmtree(input_dir, ignore_errors=True)
     input_dir.mkdir(parents=True)
     missing = [name for name in files.values() if not (MESSAGES_DIR / name).exists()]
@@ -333,35 +333,41 @@ def copy_messages(files: dict) -> tuple[dict, dict]:
     return {label: 1 for label in files}, {}
 
 
-def run_validator(extra_args: list[str] = (), tx: str = "n/a") -> dict:
+def run_validator(sources: list[Path], work_dir: Path, extra_args: list[str] = (), tx: str = "n/a") -> dict:
     # -clear-tx-cache: the validator caches terminology answers between runs, so
     # without it an offline run would reuse codes checked by an earlier online one,
     # and an online run answers from what the server said last time.
-    output = OUT_DIR / "results.json"
-    cmd = ["java", "-jar", str(VALIDATOR_JAR), str(OUT_DIR / "input"),
+    output = work_dir / "results.json"
+    output.unlink(missing_ok=True)
+    cmd = ["java", "-jar", str(VALIDATOR_JAR), *map(str, sources),
            "-version", "4.0.1", "-tx", tx, "-clear-tx-cache", *extra_args, "-output", str(output)]
     print("Running:", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    (OUT_DIR / "validator.log").write_text(proc.stdout + proc.stderr)
+    (work_dir / "validator.log").write_text(proc.stdout + proc.stderr)
     if not output.exists():
-        raise SystemExit(f"Validator produced no output (exit {proc.returncode}); see {OUT_DIR / 'validator.log'}")
+        raise SystemExit(f"Validator produced no output (exit {proc.returncode}); see {work_dir / 'validator.log'}")
     return json.loads(output.read_text())
 
 
-def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = None, top: int = 15,
-              tx: str = "n/a") -> dict:
-    # One OperationOutcome per file (a Bundle when several files were validated).
+def outcomes_of(results: dict) -> list[dict]:
+    """One OperationOutcome per file (a Bundle of them when several files were validated)."""
     if results.get("resourceType") == "Bundle":
-        outcomes = [e["resource"] for e in results.get("entry", [])]
-    else:
-        outcomes = [results]
+        return [e["resource"] for e in results.get("entry", [])]
+    return [results]
+
+
+def source_file(oo: dict) -> Path:
+    return Path(next((ext.get("valueString", "") for ext in oo.get("extension", [])
+                      if ext.get("url", "").endswith("operationoutcome-file")), ""))
+
+
+def summarize(outcomes: list[dict], counts: dict, unresolved: dict, out_dir: Path, ig: str | None = None,
+              top: int = 15, tx: str = "n/a", packages_loaded: list[str] = ()) -> dict:
     per_type = {t: Counter() for t in counts}
     messages = Counter()
     known_counts = Counter()
     for oo in outcomes:
-        source = next((ext.get("valueString", "") for ext in oo.get("extension", [])
-                       if ext.get("url", "").endswith("operationoutcome-file")), "")
-        rtype = Path(source).name.split("-", 1)[0]
+        rtype = source_file(oo).name.split("-", 1)[0]
         files_with_errors = False
         for issue in oo.get("issue", []):
             severity = issue.get("severity")
@@ -398,6 +404,7 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
         "validator": VALIDATOR_VERSION,
         "fhir_version": "4.0.1",
         "implementation_guide": ig,
+        "packages_loaded": list(packages_loaded),
         "terminology_checked": tx != "n/a",
         "terminology_server": None if tx == "n/a" else tx,
         "by_resource": {t: {"validated": counts.get(t, 0),
@@ -417,33 +424,12 @@ def summarize(results: dict, counts: dict, unresolved: dict, ig: str | None = No
         "top_messages": [{"resource": r, "severity": s, "message": m, "count": n}
                          for (r, s, m), n in messages.most_common(top)],
     }
-    (OUT_DIR / "summary.json").write_text(json.dumps(summary, indent=2))
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     return summary
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--sample", type=int, default=200, help="resources per sample")
-    ap.add_argument("--ig", choices=sorted(IGS),
-                    help=f"validate against an IG ({CARIN_PACKAGE}, {PDEX_PACKAGE}, or both for provider-access)")
-    ap.add_argument("--top", type=int, default=15, help="most frequent messages to report")
-    ap.add_argument("--tx", default="n/a", help="terminology server (default n/a: codes not checked)")
-    args = ap.parse_args()
-    global OUT_DIR
-    if args.ig:
-        OUT_DIR = Path(f"data/fhir_validation_{args.ig}")
-    download_validator()
-    packages, samples = IGS[args.ig] if args.ig else ([CARIN_PACKAGE], BASE_SAMPLES)
-    if args.ig == "payer-to-payer":
-        counts, unresolved = copy_messages(samples)
-    else:
-        counts, unresolved = export_sample(args.sample, samples, bundles=bool(args.ig))
-    # The base mode loads the CARIN package too, but only as definitions (its code
-    # systems): the exported copies carry no meta.profile, so no profile applies.
-    extra = [arg for package in packages for arg in ("-ig", package)]
-    summary = summarize(run_validator(extra, args.tx), counts, unresolved, ", ".join(packages) if args.ig else None,
-                        args.top, args.tx)
-
+def report(summary: dict, out_dir: Path) -> list[str]:
+    """Print a summary; return why it fails (empty if it passes)."""
     width = max(map(len, summary["by_resource"])) + 1
     print(f"\n{'Resource':{width}} {'Validated':>9} {'With errors':>11} {'Errors':>7} {'Warnings':>8} "
           f"{'Tx unverified':>13} {'Known':>6} {'Known err':>9}")
@@ -456,14 +442,66 @@ def main() -> None:
         print(f"  known IG error {k}: {v['count']} ({v['reason']})")
     for m in summary["top_messages"]:
         print(f"  [{m['severity']}] {m['resource']} x{m['count']}: {m['message']}")
-    print(f"\nSummary written to {OUT_DIR / 'summary.json'}")
+    print(f"\nSummary written to {out_dir / 'summary.json'}")
 
     empty = [t for t, s in summary["by_resource"].items() if s["validated"] == 0]
     failing = [t for t, s in summary["by_resource"].items() if s["resources_with_errors"]]
     dangling = [t for t, s in summary["by_resource"].items() if s["unresolved_references"]]
     if empty or failing or dangling:
-        raise SystemExit(f"Validation failed: no resources for {empty or '-'}; errors in {failing or '-'}; "
-                         f"unresolved references in {dangling or '-'}")
+        return [f"no resources for {empty or '-'}; errors in {failing or '-'}; unresolved references in {dangling or '-'}"]
+    return []
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sample", type=int, help="resources per sample (default 200, 20 for provider-access)")
+    ap.add_argument("--ig", nargs="+", choices=sorted(IGS),
+                    help=f"validate against an IG ({CARIN_PACKAGE}, {PDEX_PACKAGE}, or both for provider-access); "
+                         "several modes are validated in one validator run, with every package they need loaded")
+    ap.add_argument("--top", type=int, default=15, help="most frequent messages to report")
+    ap.add_argument("--tx", default="n/a", help="terminology server (default n/a: codes not checked)")
+    args = ap.parse_args()
+    download_validator()
+    modes = args.ig or [None]
+    out_dirs = {m: Path(f"data/fhir_validation_{m}") if m else OUT_DIR for m in modes}
+    # One mode: its input in <out>/input, as before. Several: each mode's input in
+    # data/fhir_validation_combined/input/<mode>/, one validator run over all of
+    # them (loading the packages, not validating, takes most of a run), and the
+    # results split back by input directory, one summary per mode.
+    combined = len(modes) > 1
+    work_dir = Path("data/fhir_validation_combined") if combined else out_dirs[modes[0]]
+    inputs, counts, unresolved, packages = {}, {}, {}, []
+    for m in modes:
+        input_dir = work_dir / "input" / m if combined else work_dir / "input"
+        inputs[m] = input_dir
+        mode_packages, samples = IGS[m] if m else ([CARIN_PACKAGE], BASE_SAMPLES)
+        packages += [p for p in mode_packages if p not in packages]
+        if m == "payer-to-payer":
+            counts[m], unresolved[m] = copy_messages(samples, input_dir)
+        else:
+            sample = args.sample or (20 if m == "provider-access" else 200)
+            counts[m], unresolved[m] = export_sample(sample, samples, bundles=bool(m), input_dir=input_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    # The base mode loads the CARIN package too, but only as definitions (its code
+    # systems): the exported copies carry no meta.profile, so no profile applies.
+    extra = [arg for package in packages for arg in ("-ig", package)]
+    outcomes = outcomes_of(run_validator(list(inputs.values()), work_dir, extra, args.tx))
+
+    failures = []
+    for m in modes:
+        out_dir = out_dirs[m]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        mine = [oo for oo in outcomes if source_file(oo).parent.name == inputs[m].name] if combined else outcomes
+        if combined:
+            # The validator's log covers every mode; each mode's directory gets a copy.
+            shutil.copy(work_dir / "validator.log", out_dir / "validator.log")
+        if m:
+            print(f"\n=== {m} ===")
+        summary = summarize(mine, counts[m], unresolved[m], out_dir, ", ".join(IGS[m][0]) if m else None,
+                            args.top, args.tx, packages)
+        failures += [f"{m or 'base'}: {f}" for f in report(summary, out_dir)]
+    if failures:
+        raise SystemExit("Validation failed: " + " | ".join(failures))
 
 
 if __name__ == "__main__":
