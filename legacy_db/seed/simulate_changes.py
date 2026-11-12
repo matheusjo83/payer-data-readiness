@@ -9,6 +9,7 @@ change data capture sees a realistic stream of inserts, updates and deletes:
     new_claim           new claim with 1-4 lines (member with active coverage)
     move_member         member changes address (zip code)
     purge_void_claim    voided claim is deleted (header + lines)
+    change_opt_out      member opts out of the Provider Access API, or opts back in
 
 Usage:
     python legacy_db/seed/simulate_changes.py --events 300 --duration 60
@@ -36,6 +37,7 @@ EVENT_WEIGHTS = {
     "new_claim": 25,
     "move_member": 10,
     "purge_void_claim": 5,
+    "change_opt_out": 5,
 }
 PROC_CODES = ["99213", "99214", "99203", "80053", "85025", "71046", "93000",
               "97110", "36415", "99285"]
@@ -69,6 +71,9 @@ class Simulator:
         ).fetchone()[0]
         self.next_pa = cur.execute(
             "SELECT coalesce(max(substr(pa_id, 3)::bigint), 0) + 1 FROM pa_req"
+        ).fetchone()[0]
+        self.next_consent = cur.execute(
+            "SELECT coalesce(max(substr(cnsnt_id, 3)::bigint), 0) + 1 FROM mbr_cnsnt"
         ).fetchone()[0]
 
     def decide_prior_auth(self, cur, now) -> bool:
@@ -162,6 +167,28 @@ class Simulator:
             return False
         cur.execute("DELETE FROM clm_ln WHERE clm_id = %s", [row[0]])
         cur.execute("DELETE FROM clm_hdr WHERE clm_id = %s", [row[0]])
+        return True
+
+    def change_opt_out(self, cur, now) -> bool:
+        today = ymd(now)
+        if random.random() < 0.5:
+            # Opt back in: the opt-out ends today.
+            row = cur.execute(
+                "SELECT cnsnt_id FROM mbr_cnsnt WHERE cnsnt_typ = 'PAO' AND term_dt = '99991231' "
+                "AND eff_dt < %s ORDER BY random() LIMIT 1", [today]).fetchone()
+            if row:
+                cur.execute("UPDATE mbr_cnsnt SET term_dt = %s, upd_ts = %s WHERE cnsnt_id = %s",
+                            [today, now, row[0]])
+                return True
+        mbr_id = random.choice(self.member_ids)
+        if cur.execute("SELECT 1 FROM mbr_cnsnt WHERE mbr_id = %s AND cnsnt_typ = 'PAO' AND term_dt = '99991231'",
+                       [mbr_id]).fetchone():
+            return False
+        cnsnt_id = f"CN{self.next_consent:012d}"
+        self.next_consent += 1
+        cur.execute(
+            "INSERT INTO mbr_cnsnt (cnsnt_id, mbr_id, cnsnt_typ, eff_dt, term_dt, upd_ts) "
+            "VALUES (%s, %s, 'PAO', %s, '99991231', %s)", [cnsnt_id, mbr_id, today, now])
         return True
 
     def run_event(self, name: str) -> bool:

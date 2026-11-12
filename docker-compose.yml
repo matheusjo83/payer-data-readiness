@@ -67,6 +67,37 @@ services:
     ports:
       - "8090:8080"
 
+  # Provider Access and Payer-to-Payer APIs (CMS-0057-F): a second HAPI server with
+  # the data those APIs share, without financial data (the CARIN Basis claims,
+  # under the same IDs as the full ones on fhir-server), the attribution lists
+  # and the opt-outs. Clients reach it through fhir-gateway.
+  fhir-server-provider:
+    profiles: [api]
+    image: hapiproject/hapi:v8.12.0-2
+    container_name: payer-fhir-server-provider
+    environment:
+      hapi.fhir.fhir_version: R4
+      hapi.fhir.bulk_export_enabled: "true"
+    ports:
+      - "8091:8080"
+
+  # The Da Vinci PDex operations HAPI does not implement ($davinci-data-export,
+  # $bulk-member-match, $member-match), in front of fhir-server-provider; every
+  # other request is passed through to it. Standard library only.
+  fhir-gateway:
+    profiles: [api]
+    image: python:3.12-slim
+    container_name: payer-fhir-gateway
+    depends_on: [fhir-server-provider]
+    environment:
+      UPSTREAM_FHIR_URL: http://fhir-server-provider:8080/fhir
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./fhir/gateway:/opt/gateway:ro
+    command: ["python", "-I", "/opt/gateway/gateway.py", "--port", "8080"]
+    ports:
+      - "8092:8080"
+
   # Orchestration (optional): docker compose --profile airflow up -d
   airflow-db:
     profiles: [airflow]

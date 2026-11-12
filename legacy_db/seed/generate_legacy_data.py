@@ -37,6 +37,10 @@ RATE_CLAIM_UNKNOWN_MEMBER = 0.010
 RATE_PAID_GT_CHARGED = 0.020
 RATE_ORPHAN_LINE = 0.005
 RATE_CLAIM_OUTSIDE_ELIGIBILITY = 0.010
+# Not data-quality issues: members who opted out of the Provider Access API, and
+# the share of them who later opted back in.
+RATE_PROVIDER_ACCESS_OPT_OUT = 0.030
+RATE_OPT_OUT_REVOKED = 0.150
 
 # Reference date of the figures published in docs/results.md.
 DEFAULT_AS_OF = date(2026, 9, 28)
@@ -77,7 +81,11 @@ def npi_with_check_digit(base9: str) -> str:
 
 
 def rand_date(start: date, end: date) -> date:
-    return start + timedelta(days=random.randint(0, (end - start).days))
+    return rand_date_with(random, start, end)
+
+
+def rand_date_with(rng, start: date, end: date) -> date:
+    return start + timedelta(days=rng.randint(0, (end - start).days))
 
 
 def connect_with_retry(dsn: str, attempts: int = 20) -> psycopg.Connection:
@@ -233,8 +241,22 @@ def main() -> None:
         amount = round(pa_rng.uniform(40, 1500), 2)
         pas.append((f"PA{i + 1:012d}", mid, prv, svc, urgent, req, dcsn_ts, dcsn, amount, now))
 
+    # Provider Access API opt-outs (CMS-0057-F lets members opt out of having their
+    # data available to their providers), from their own random generator, so no
+    # other table changes. Some members opted back in later (term_dt set).
+    consent_rng = random.Random(args.seed + 5)
+    consents = []
+    for mid in member_ids:
+        if consent_rng.random() >= RATE_PROVIDER_ACCESS_OPT_OUT:
+            continue
+        eff = rand_date_with(consent_rng, date(2025, 1, 1), today - timedelta(days=2))
+        term = (ymd(rand_date_with(consent_rng, eff + timedelta(days=1), today - timedelta(days=1)))
+                if consent_rng.random() < RATE_OPT_OUT_REVOKED else "99991231")
+        consents.append((f"CN{len(consents) + 1:012d}", mid, "PAO", ymd(eff), term,
+                         now - timedelta(days=consent_rng.randint(0, 30))))
+
     with connect_with_retry(PG_DSN) as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE pln, mbr_mstr, elig_span, prv, clm_hdr, clm_ln, pa_req RESTART IDENTITY")
+        cur.execute("TRUNCATE pln, mbr_mstr, elig_span, prv, clm_hdr, clm_ln, pa_req, mbr_cnsnt RESTART IDENTITY")
         copy_rows(cur, "pln", ["pln_id", "pln_nm", "lob_cd", "eff_dt", "term_dt"], plans)
         copy_rows(cur, "mbr_mstr", ["mbr_id", "fst_nm", "lst_nm", "dob", "gndr_cd",
                                     "zip_cd", "st_cd", "upd_ts"], members)
@@ -247,11 +269,13 @@ def main() -> None:
                                   "chrg_amt", "pd_amt", *LINE_DETAIL_COLS, "upd_ts"], lines)
         copy_rows(cur, "pa_req", ["pa_id", "mbr_id", "prv_id", "svc_cd", "urgnt_flg",
                                   "req_ts", "dcsn_ts", "dcsn_cd", "req_amt", "upd_ts"], pas)
+        copy_rows(cur, "mbr_cnsnt", ["cnsnt_id", "mbr_id", "cnsnt_typ", "eff_dt", "term_dt", "upd_ts"], consents)
         conn.commit()
 
     print(f"Loaded: {len(members)} member rows ({len(members) - len(member_ids)} duplicates), "
           f"{len(providers)} providers, {len(claims)} claims, {len(lines)} claim lines "
-          f"({n_orphans} orphans), {len(pas)} prior auths ({pas_moved} moved into coverage), as of {today}.")
+          f"({n_orphans} orphans), {len(pas)} prior auths ({pas_moved} moved into coverage), "
+          f"{len(consents)} Provider Access opt-outs, as of {today}.")
 
 
 if __name__ == "__main__":

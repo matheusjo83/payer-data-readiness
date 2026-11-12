@@ -51,7 +51,7 @@ PG_DSN = os.environ.get(
     "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
 )
 SLOT = "lakehouse_cdc"
-TABLES = ["pln", "mbr_mstr", "elig_span", "prv", "clm_hdr", "clm_ln", "pa_req"]
+TABLES = ["pln", "mbr_mstr", "elig_span", "prv", "clm_hdr", "clm_ln", "pa_req", "mbr_cnsnt"]
 BATCH_FILE = Path("data/cdc_batch.ndjson")
 MAX_CHANGES_PER_BATCH = 200_000
 # slot-status fails above this much retained WAL: half the cap set in
@@ -361,7 +361,8 @@ def sync_once(pg) -> int:
 
 
 def ensure_usable_slot(pg) -> None:
-    """Take a snapshot when there is no state, no slot, or the slot was lost.
+    """Take a snapshot when there is no state, no slot, the slot was lost, or a
+    captured table has no change table yet.
 
     A lost slot can no longer return changes: Postgres removed WAL the loader
     had not read. The observation is recorded before the new snapshot, so the
@@ -374,9 +375,17 @@ def ensure_usable_slot(pg) -> None:
         lost = status is not None and status["wal_status"] == "lost"
         if lost:
             record_slot_status(con, status, "resnapshot")
+        present = {name for (name,) in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'bronze'").fetchall()}
+        missing = [t for t in TABLES if f"legacy_{t}_changes" not in present]
     finally:
         con.close()
-    if lost:
+    if missing and state is not None and not lost:
+        # A table added to the capture (TABLES) after the last snapshot has no
+        # change table yet, and the slot only streams changes from now on.
+        print(f"Legacy tables not captured yet ({', '.join(missing)}): taking a new snapshot.")
+        snapshot()
+    elif lost:
         print(f"Replication slot {SLOT} was invalidated (WAL retention cap exceeded): "
               "taking a new snapshot.")
         snapshot()

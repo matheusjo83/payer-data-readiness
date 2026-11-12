@@ -6,7 +6,10 @@
 # 2.1.0, with codes checked by tx.fhir.org. dbt checks every code against the CMS
 # and FDA releases (gold.terminology_code_check). Then the gold resources are
 # published to a HAPI FHIR server and checked through its API (searches, Bulk
-# $export). Last, legacy changes are streamed and applied incrementally, and the
+# $export), and the data of the Provider Access and Payer-to-Payer APIs (claims
+# without financial data, attribution lists, opt-outs) to a second one, checked
+# through the gateway that implements the Da Vinci PDex operations. Last, legacy
+# changes are streamed and applied incrementally, and the
 # current state is checked against a full rebuild and against Postgres. The
 # lakehouse is DuckLake: a catalog in Postgres (lakehouse-catalog), Parquet data.
 name: CI
@@ -82,8 +85,8 @@ jobs:
       - name: Start legacy database and lakehouse catalog
         run: make up
 
-      # Started early: the server takes a while to boot, and publishing waits for it.
-      - name: Start FHIR server
+      # Started early: the servers take a while to boot, and publishing waits for them.
+      - name: Start FHIR servers
         run: make fhir-up
 
       - name: Generate legacy data
@@ -116,11 +119,20 @@ jobs:
       - name: FHIR validation (Da Vinci PDex 2.1.0 prior authorizations, tx.fhir.org)
         run: make fhir-validate-pdex
 
-      - name: Publish to the FHIR server
+      - name: FHIR validation (Provider Access data, CARIN Basis and Da Vinci PDex 2.1.0, tx.fhir.org)
+        run: make fhir-validate-provider
+
+      - name: Publish to the FHIR servers
         run: make fhir-publish
 
       - name: FHIR API checks (searches, Bulk $export)
         run: make fhir-api-check
+
+      - name: Provider Access and Payer-to-Payer API checks (PDex operations)
+        run: make fhir-provider-api-check
+
+      - name: FHIR validation (Payer-to-Payer messages, Da Vinci PDex 2.1.0, tx.fhir.org)
+        run: make fhir-validate-p2p
 
       # Last, so the steps above use the data as generated: simulated legacy
       # changes, a CDC sync, the incremental dbt run, parity with a full rebuild
@@ -141,8 +153,15 @@ jobs:
             data/fhir_validation_carin-bb/validator.log
             data/fhir_validation_pdex/summary.json
             data/fhir_validation_pdex/validator.log
+            data/fhir_validation_provider-access/summary.json
+            data/fhir_validation_provider-access/validator.log
+            data/fhir_validation_payer-to-payer/summary.json
+            data/fhir_validation_payer-to-payer/validator.log
             data/fhir_publish.json
+            data/fhir_publish_provider.json
             data/fhir_api.json
+            data/fhir_provider_api.json
+            data/fhir_provider_api/messages/
             data/cdc_reconcile.json
             dbt/target/run_results.json
 

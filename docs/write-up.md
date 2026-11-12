@@ -47,6 +47,10 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   reviewer, and a second Splink model for duplicates within the PBM). For the FHIR API he chose a
   HAPI FHIR server loaded from gold and prior authorizations as Da Vinci PDex resources, and,
   when the prior authorization data fell short of the profile, how to complete it.
+- **After v3.0.0** Matheus chose the next direction (the Provider Access and Payer-to-Payer APIs,
+  with the other options kept in a backlog) and, for it, a gateway in front of HAPI for the PDex
+  operations, the claims without financial data as a gold model on a second server, the opt-outs
+  as a legacy table captured by CDC, and PDex 2.1.0.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -85,6 +89,12 @@ work he did himself. Work done by Claude Code is attributed to it.
   from gold, including 3,000 prior authorizations as Da Vinci PDex resources (zero errors against
   PDex 2.1.0). 143 checks computed from gold pass through the API: counts, the searches CARIN
   and PDex require, and a Bulk `$export` whose every resource equals its gold version.
+- **Provider Access and Payer-to-Payer.** 300 attribution lists built from claims and prior
+  authorizations, opt-outs captured from the legacy database and checked when an export runs, the
+  claims without financial data (CARIN Basis profiles), and a gateway that implements the PDex
+  export and member match operations HAPI lacks. 129 checks computed from gold pass through it,
+  including an opt-out added after the list was built and a match request with a case for every
+  rule.
 - **Identity resolution with ground truth.** A PBM feed sends 2,900 of the members under its own
   IDs, with nicknames, typos, changed names, mistyped birth dates and old addresses, plus 275 people
   the payer does not know and 94 people with a second cardholder ID. A Splink model links 2,928 of
@@ -623,6 +633,58 @@ compared the incremental table with a rebuild from a change table the loader had
 past. It now stops at the incremental table's watermark, which is why deleted keys stay as
 tombstones instead of being removed.
 
+## Provider Access and Payer-to-Payer, and what a provider may not see
+
+The FHIR API served the members' own data. CMS-0057-F also asks a payer to share it with the
+providers who treat them (the Provider Access API) and with the member's next health plan (the
+Payer-to-Payer API), both without remittances or cost-sharing, both by January 2027. Claude Code
+read the Da Vinci PDex 2.1.0 pages for both, presented the alternatives, and I chose its
+recommendations each time: a small gateway in front of HAPI for the operations HAPI does not
+have; the claims without financial data as a gold model, served from a second HAPI server; the
+opt-outs as a legacy table captured by CDC; and PDex 2.1.0, the version the prior authorizations
+already use, with the changes in 2.2.0 documented rather than followed.
+
+The claims without financial data are not mapped again. CARIN 2.1.0 has a *Basis* version of
+each claim profile, the full one with only the financial requirements removed, and the model
+derives each claim from the full resource: it removes the totals, the payment, the line amounts
+and every adjudication that carries an amount, and keeps the rest, including whether the claim
+was paid in or out of network. A test checks that no amount is left and that the lines,
+diagnoses and references are those of the full claim.
+
+Attribution comes from the claims, which PDex allows: a member belongs to the list of a provider
+who billed an in-network claim or asked for a prior authorization for them in the last 24 months.
+That gives 300 lists. Of the 3,911 attributed members, 89 had opted out, so they are left out of
+the lists and counted in each one. CMS lets members opt out, and PDex says the consent status
+must be checked when an export runs, not only when the list is built. The legacy database now
+records opt-outs (132, 17 of them ended when the member opted back in), and the gateway checks
+them against the server on every export, so an opt-out recorded an hour after the list was built
+still keeps that member's data from leaving.
+
+The gateway is the part I would look at first in a review, since HAPI does neither operation.
+For an export it runs HAPI's Group export and filters the result, because HAPI ignores the
+`patient` parameter on a Group export and adds the Group itself: only the members asked for,
+without the ones opted out at that moment, and, for another payer, only claims from the last five
+years and prior authorizations that are pending or were decided in the last twelve months. A
+download records on the Group what each member was sent, as PDex requires, and a later delta
+sends only what changed since. For the Payer-to-Payer match it takes what the new plan knows
+(the member's demographics, the old member ID, the member's consent) and answers with three
+groups: matched, not matched, and matched but not shareable because of the consent. A changed
+family name still matches; two members with the same demographics do not. This payer has no way
+to tell sensitive data apart, so a consent for non-sensitive data only cannot be complied with,
+and the member goes to the third group instead of receiving everything.
+
+The checks work the same way as before: a script plays the provider and the new payer, and gold
+decides what the answers should be. It exports three attribution lists, puts an opt-out on the
+server after the lists were built, runs a download and then a delta, sends a match request with a
+case for every rule, exports the matched members and calls the one-member match. All 129 checks
+pass, and they fail when they should: with one full claim, amounts included, put back on the
+Provider Access server and one opt-out deleted, five of them failed. The validator found the gaps in the request my check sends, as it should have: HRex
+requires a member ID on the old coverage, so the case I had written as "no member ID" became "a
+member ID this payer does not know". It also found one error that no request can avoid. HRex's
+two consent policy codes are links to anchors on a web page, which the validator cannot resolve,
+and the guide's own example fails with the same error. It is counted apart, with the reason, like
+the three warnings that come from conflicts between PDex and the guides it builds on.
+
 ## What this does not show, and what would change for production
 
 - **Terminology.** CPT and NUBC revenue codes are licensed, so nothing here checks them, and the
@@ -634,9 +696,15 @@ tombstones instead of being removed.
   The narratives here are generated one-line summaries, enough for `dom-6` but not a designed
   human-readable view. The validator covers a sample; the code check in dbt covers every
   resource, but only the code systems it has.
-- **The API.** The server has no authentication: a Patient Access API needs SMART on FHIR
-  authorization, so that each member reads only their own data, and nothing here does that. It
-  runs on HAPI's embedded H2 database and is rebuilt on every publish, so its `lastUpdated` is
+- **The API.** The servers have no authentication: a Patient Access API needs SMART on FHIR
+  authorization, so that each member reads only their own data, and the Provider Access and
+  Payer-to-Payer APIs need SMART Backend Services, so that a provider exports only their own list
+  and only the payer a member consented to receives their data. Nothing here does that, and
+  without it the opt-outs are enforced only on the bulk export: a provider could still search for
+  an opted-out member's claims. The Payer-to-Payer consent is checked when the match is made, not
+  again at export. The legacy source has no clinical data, so the US Core data both APIs share is
+  absent. The servers
+  run on HAPI's embedded H2 database and are rebuilt on every publish, so their `lastUpdated` is
   the publish time; a production server would sit on a real database and receive only what
   changed. Prior authorizations are published, not requested: the provider-facing Prior
   Authorization API (Da Vinci PAS) is outside this project.
@@ -678,7 +746,7 @@ tombstones instead of being removed.
    rebuilt state against the source, not in unit-level checks.
 3. **Make tests prove they can fail.** A parity check or a validator that always passes is only
    evidence once you have seen it catch a deliberate error.
-4. **Publish the uncomfortable numbers.** Column test coverage of 22.9% in gold, eight unimplemented
+4. **Publish the uncomfortable numbers.** Column test coverage of 25.1% in gold, eight unimplemented
    experimental tests and a 14-second view are part of the result. Hiding them would make every
    other number less credible.
 5. **Treat the data layer as the product.** An interoperability API can only be as reliable as the

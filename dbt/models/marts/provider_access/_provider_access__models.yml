@@ -1,0 +1,101 @@
+version: 2
+
+models:
+  - name: provider_attribution
+    description: >
+      Members attributed to each provider for the Provider Access API (CMS-0057-F): an in-network
+      claim (not voided) or a prior authorization request from the provider in the 24 months
+      before the reference date, for a member covered on that date. Members who had opted out on
+      that date are kept and flagged; the attribution lists leave them out.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [provider_id, member_id]
+    columns:
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_provider')
+                field: provider_id
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_member')
+                field: member_id
+      - name: eligibility_id
+        description: The member's coverage span on the reference date.
+        data_tests: [not_null]
+      - name: attribution_window_start
+        description: First day of the 24-month window the treatment relationship is looked for in.
+      - name: first_service_date
+        description: First claim service date or prior authorization request date in the window.
+      - name: last_service_date
+        description: Last claim service date or prior authorization request date in the window.
+      - name: claims
+        description: In-network claims from the provider for the member in the window.
+      - name: prior_auths
+        description: Prior authorization requests from the provider for the member in the window.
+      - name: is_opted_out
+        description: True when the member had opted out of the Provider Access API on the reference date.
+        data_tests: [not_null]
+
+  - name: fhir_provider_group
+    description: >
+      The attribution list of each provider as a FHIR Group conforming to the Da Vinci PDex
+      Provider Group profile (STU 2.1.0, based on the Da Vinci ATR Group): the attributed members
+      without the ones who opted out, whose count is in the members-opted-out extension. Published
+      to the Provider Access FHIR server and exported with Group/[id]/$davinci-data-export.
+    columns:
+      - name: id
+        description: Group.id ('attribution-' + legacy provider ID).
+        data_tests: [unique, not_null]
+      - name: provider_id
+        description: "{{ doc('provider_id') }}"
+        data_tests: [unique, not_null]
+      - name: attributed
+        description: Members in the list.
+      - name: opted_out
+        description: Attributed members left out because they had opted out.
+      - name: resource
+        description: The FHIR Group resource as JSON, without null values.
+        data_tests: [not_null]
+
+  - name: fhir_provider_consent
+    description: >
+      Provider Access API opt-outs as FHIR Consent resources conforming to the Da Vinci PDex
+      Provider Access Consent profile (STU 2.1.0), including the ones that ended (the period says
+      when each was in force). The API checks them when it runs an export.
+    columns:
+      - name: id
+        description: Consent.id ('optout-' + legacy consent ID).
+        data_tests: [unique, not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests: [not_null]
+      - name: effective_date
+        description: Day the opt-out took effect.
+      - name: end_date
+        description: Day the member opted back in; null while in force.
+      - name: resource
+        description: The FHIR Consent resource as JSON, without null values.
+        data_tests: [not_null]
+
+  - name: fhir_explanation_of_benefit_basis
+    description: >
+      The claims of fhir_explanation_of_benefit without financial data (total, payment, item net
+      and every adjudication with an amount), conforming to the CARIN Blue Button (STU 2.1.0) Basis
+      profile of each claim type, for the Provider Access and Payer-to-Payer APIs. Same IDs as the
+      full resources, published to the Provider Access FHIR server.
+    columns:
+      - name: id
+        description: ExplanationOfBenefit.id (legacy claim ID or PBM claim ID).
+        data_tests: [unique, not_null]
+      - name: resource
+        description: The FHIR ExplanationOfBenefit resource as JSON, without null values.
+        data_tests: [not_null]
