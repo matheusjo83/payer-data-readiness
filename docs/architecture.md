@@ -338,6 +338,13 @@ gold (dbt) ── publish ─► fhir-server-provider (HAPI, :8091) ◄── fh
   profiles the ATR coverage reference allows), and one error from HRex itself (its consent policy
   codes are HTML page anchors the validator cannot resolve; the IG's own example fails the same
   way). They are counted apart with the reason, like the known CARIN warnings.
+- **One validator run in CI.** Loading the packages takes the validator about three minutes (PDex
+  pulls several versions of the HL7 terminology), validating the samples seconds. `make
+  fhir-validate-all` passes the four samples (CARIN, PDex, Provider Access, Payer-to-Payer) to one
+  run with both packages loaded, each from its own input directory, and splits the results back
+  into one summary per sample, so the reports are the same as from the four separate targets.
+  Loading PDex next to CARIN changes nothing in the CARIN results (checked: the same summaries).
+  It runs after the API checks, which write the Payer-to-Payer messages.
 - **Check.** `fhir/provider_api_check.py` (`make fhir-provider-api-check`) calls the gateway as a
   provider and as a new payer would and compares every answer with gold: counts; claims equal to
   their Basis resource; Group search by NPI; snapshot exports of three attribution lists, whose
