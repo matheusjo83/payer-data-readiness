@@ -7,3 +7,6 @@ psycopg[binary]==3.3.6
 # Identity resolution (dbt Python model gold.identity_matches_splink).
 splink==5.0.0
 pyarrow==25.0.1
+# SMART on FHIR clients (fhir/smart_client.py, fhir/auth/clients.py): signed JWT assertions.
+pyjwt==2.15.1
+cryptography==50.0.2

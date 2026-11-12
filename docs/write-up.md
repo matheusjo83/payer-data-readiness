@@ -696,12 +696,11 @@ the three warnings that come from conflicts between PDex and the guides it build
   The narratives here are generated one-line summaries, enough for `dom-6` but not a designed
   human-readable view. The validator covers a sample; the code check in dbt covers every
   resource, but only the code systems it has.
-- **The API.** The servers have no authentication: a Patient Access API needs SMART on FHIR
-  authorization, so that each member reads only their own data, and the Provider Access and
-  Payer-to-Payer APIs need SMART Backend Services, so that a provider exports only their own list
-  and only the payer a member consented to receives their data. Nothing here does that, and
-  without it the opt-outs are enforced only on the bulk export: a provider could still search for
-  an opted-out member's claims. The Payer-to-Payer consent is checked when the match is made, not
+- **The API.** The authorization is a demonstration: a SMART authorization server written for
+  this project (clients in a file, keys in memory, a simulated member login, no TLS) in front of
+  gateways that decide what each client sees. It shows the rules (a member's app sees one patient;
+  a provider only the members on its list who have not opted out, one at a time; another payer
+  only the members whose consent names it), not a production identity provider. The Payer-to-Payer consent is checked when the match is made, not
   again at export. The legacy source has no clinical data, so the US Core data both APIs share is
   absent. The servers
   run on HAPI's embedded H2 database and are rebuilt on every publish, so their `lastUpdated` is

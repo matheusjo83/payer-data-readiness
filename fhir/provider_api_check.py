@@ -34,12 +34,19 @@ computed from the gold models, independently of the server:
   $member-match    one member: a match, no match (422) and an unusable consent
                    (422).
 
+Every call carries a SMART access token (Backend Services): each attribution
+list is read and exported by its own provider's client (provider-<id>), the
+Payer-to-Payer calls by the new payer's (payer-new-payer), and the counts, the
+claim sample, the reset of the lists and the opt-out added for the check by the
+payer's administration client (admin-provider-access). What a client may not
+do is checked by make fhir-security-check.
+
 The Payer-to-Payer request and response are written to
 data/fhir_provider_api/messages/ (validated by make fhir-validate-provider).
 Writes data/fhir_provider_api.json and exits with status 1 if any check fails.
 
 Usage (from the repository root, after make fhir-publish):
-    python fhir/provider_api_check.py [--base http://localhost:8092/fhir] [--upstream http://localhost:8091/fhir]
+    python fhir/provider_api_check.py [--base http://localhost:8092/fhir]
 """
 
 import argparse
@@ -55,6 +62,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from api_check import Checks, sample, without_meta
+from smart_client import BackendClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ingestion"))
 import lakehouse  # noqa: E402
@@ -62,7 +70,20 @@ import lakehouse  # noqa: E402
 REPORT = Path("data/fhir_provider_api.json")
 MESSAGES = Path("data/fhir_provider_api/messages")
 DEFAULT_BASE = os.environ.get("FHIR_GATEWAY_URL", "http://localhost:8092/fhir")
-DEFAULT_UPSTREAM = os.environ.get("FHIR_PROVIDER_BASE_URL", "http://localhost:8091/fhir")
+PROVIDER_SCOPE = "system/Patient.rs system/Coverage.rs system/ExplanationOfBenefit.rs system/Group.rs system/Organization.rs"
+PAYER_SCOPE = "system/Group.crs system/Patient.rs system/Coverage.r system/ExplanationOfBenefit.r system/Organization.r"
+ADMIN = BackendClient("admin-provider-access", "system/*.cruds")
+NEW_PAYER = BackendClient("payer-new-payer", PAYER_SCOPE)
+_providers: dict[str, BackendClient] = {}
+
+
+def provider_client(group_or_provider_id: str) -> BackendClient:
+    """The backend client of a provider (its attribution list is attribution-<provider id>)."""
+    pid = group_or_provider_id.removeprefix("attribution-")
+    if pid not in _providers:
+        _providers[pid] = BackendClient(f"provider-{pid}", PROVIDER_SCOPE)
+    return _providers[pid]
+
 PDEX = "http://hl7.org/fhir/us/davinci-pdex/"
 HREX = "http://hl7.org/fhir/us/davinci-hrex/"
 MEMBER_ID = "https://payer-data-readiness.example/member-id"
@@ -75,12 +96,13 @@ LAST_TRANSMISSION = PDEX + "StructureDefinition/base-ext-last-transmission"
 TYPES = ["Patient", "Coverage", "ExplanationOfBenefit", "Organization"]
 
 
-def call(method: str, url: str, body: dict | None = None, headers: dict | None = None):
+def call(method: str, url: str, body: dict | None = None, headers: dict | None = None,
+         client: BackendClient | None = None):
     """(status, headers, parsed JSON or raw bytes); HTTP errors are returned."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
         "Accept": "application/fhir+json", "Content-Type": "application/fhir+json", "Cache-Control": "no-cache",
-        **(headers or {})})
+        **(client.headers() if client else {}), **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
             status, hdrs, raw = resp.status, dict(resp.headers), resp.read()
@@ -92,8 +114,8 @@ def call(method: str, url: str, body: dict | None = None, headers: dict | None =
         return status, hdrs, raw
 
 
-def ndjson(url: str) -> list[dict]:
-    req = urllib.request.Request(url, headers={"Accept": "application/fhir+ndjson"})
+def ndjson(url: str, client: BackendClient) -> list[dict]:
+    req = urllib.request.Request(url, headers={"Accept": "application/fhir+ndjson", **client.headers()})
     with urllib.request.urlopen(req, timeout=300) as resp:
         return [json.loads(line) for line in resp.read().decode().splitlines() if line.strip()]
 
@@ -109,15 +131,15 @@ def parameters(**values) -> dict:
     return {"resourceType": "Parameters", "parameter": params}
 
 
-def export(base: str, group_id: str, **values) -> tuple[dict, dict, list]:
+def export(base: str, group_id: str, client: BackendClient, **values) -> tuple[dict, dict, list]:
     """Run $davinci-data-export; (manifest, {type: {id: resource}}, OperationOutcomes)."""
     status, headers, body = call("POST", f"{base}/Group/{group_id}/$davinci-data-export", parameters(**values),
-                                 {"Prefer": "respond-async"})
+                                 {"Prefer": "respond-async"}, client)
     if status != 202:
         raise SystemExit(f"Export of Group/{group_id} not accepted: HTTP {status} {body}")
     poll, started = headers["Content-Location"], time.time()
     while True:
-        status, _, manifest = call("GET", poll, headers={"Accept": "application/json"})
+        status, _, manifest = call("GET", poll, headers={"Accept": "application/json"}, client=client)
         if status == 200:
             break
         if status != 202 or time.time() - started > 900:
@@ -125,9 +147,9 @@ def export(base: str, group_id: str, **values) -> tuple[dict, dict, list]:
         time.sleep(2)
     resources = defaultdict(dict)
     for output in manifest["output"]:
-        for r in ndjson(output["url"]):
+        for r in ndjson(output["url"], client):
             resources[r["resourceType"]][r["id"]] = r
-    outcomes = [o for err in manifest.get("error", []) for o in ndjson(err["url"])]
+    outcomes = [o for err in manifest.get("error", []) for o in ndjson(err["url"], client)]
     return manifest, resources, outcomes
 
 
@@ -197,14 +219,14 @@ def compare_export(checks: Checks, group: str, label: str, expected: dict, got: 
     checks.add(group, f"{label}: no amount on any claim", 0, sum('"amount"' in json.dumps(r) for r in claims))
 
 
-def group_members(base: str, group_id: str) -> dict:
-    status, _, group = call("GET", f"{base}/Group/{group_id}")
+def group_members(base: str, group_id: str, client: BackendClient) -> dict:
+    status, _, group = call("GET", f"{base}/Group/{group_id}", client=client)
     return {m["entity"]["reference"]: m for m in group.get("member", [])} if status == 200 else {}
 
 
 def check_counts(base: str, gold: Gold, checks: Checks) -> None:
     def total(query: str) -> int:
-        return call("GET", f"{base}/{query}{'&' if '?' in query else '?'}_summary=count")[2]["total"]
+        return call("GET", f"{base}/{query}{'&' if '?' in query else '?'}_summary=count", client=ADMIN)[2]["total"]
 
     expected = {
         "Patient": "gold.fhir_patient", "Coverage": "gold.fhir_coverage", "Organization": "gold.fhir_organization",
@@ -220,7 +242,7 @@ def check_counts(base: str, gold: Gold, checks: Checks) -> None:
 def check_no_financial_data(base: str, gold: Gold, checks: Checks) -> None:
     for (eob_id,) in sample(gold.con, "SELECT id AS k FROM gold.fhir_explanation_of_benefit_basis"):
         expected = gold.resources("gold.fhir_explanation_of_benefit_basis", "id = ?", [eob_id])[eob_id]
-        status, _, got = call("GET", f"{base}/ExplanationOfBenefit/{eob_id}")
+        status, _, got = call("GET", f"{base}/ExplanationOfBenefit/{eob_id}", client=ADMIN)
         checks.add("no financial data: claim equal to its Basis resource", eob_id, True,
                    status == 200 and without_meta(got) == without_meta(expected))
 
@@ -229,37 +251,41 @@ def check_attribution(base: str, gold: Gold, checks: Checks, groups: list[str]) 
     for provider_id, npi in sample(gold.con, "SELECT provider_id AS k, npi FROM gold.dim_provider WHERE npi_valid "
                                              "AND provider_id IN (SELECT provider_id FROM gold.fhir_provider_group)"):
         npi_token = urllib.parse.quote("http://hl7.org/fhir/sid/us-npi|" + npi)
-        status, _, bundle = call("GET", f"{base}/Group?identifier={npi_token}&_elements=id")
+        status, _, bundle = call("GET", f"{base}/Group?identifier={npi_token}&_elements=id",
+                                 client=provider_client(provider_id))
         checks.add("attribution: Group?identifier (provider NPI)", provider_id, [f"attribution-{provider_id}"],
                    sorted(e["resource"]["id"] for e in bundle.get("entry", [])))
     for gid in groups:
         provider = gid.removeprefix("attribution-")
         expected = sorted(f"Patient/{m}" for (m,) in gold.rows(
             "SELECT member_id FROM gold.provider_attribution WHERE provider_id = ? AND NOT is_opted_out", [provider]))
-        checks.add("attribution: list members equal to gold", gid, expected, sorted(group_members(base, gid)))
+        checks.add("attribution: list members equal to gold", gid, expected,
+                   sorted(group_members(base, gid, provider_client(gid))))
 
 
-def check_provider_exports(base: str, upstream: str, gold: Gold, checks: Checks, groups: list[str]) -> dict:
+def check_provider_exports(base: str, gold: Gold, checks: Checks, groups: list[str]) -> dict:
     timings = {}
     # A previous run may have recorded transmissions on these lists: start from gold.
     for gid in groups:
         resource = gold.resources("gold.fhir_provider_group", "id = ?", [gid])[gid]
-        call("PUT", f"{upstream}/Group/{gid}", resource)
+        call("PUT", f"{base}/Group/{gid}", resource, client=ADMIN)
 
     for gid in groups:
         started = time.time()
-        manifest, got, _ = export(base, gid, exportType=SNAPSHOT)
+        manifest, got, _ = export(base, gid, provider_client(gid), exportType=SNAPSHOT)
         timings[gid] = round(time.time() - started, 1)
         day = datetime.fromisoformat(manifest["transactionTime"]).date()
-        members = {r.removeprefix("Patient/") for r in group_members(base, gid)} - gold.opted_out_on(day)
+        members = {r.removeprefix("Patient/") for r in group_members(base, gid, provider_client(gid))} \
+            - gold.opted_out_on(day)
         compare_export(checks, "export: provider-snapshot", gid, gold.member_data(members), got)
 
     gid = groups[0]
-    members = sorted(r.removeprefix("Patient/") for r in group_members(base, gid))
+    provider = provider_client(gid)
+    members = sorted(r.removeprefix("Patient/") for r in group_members(base, gid, provider))
     a, b = members[0], members[1]
 
     # patient parameter, with one reference that is not a member.
-    _, got, outcomes = export(base, gid, exportType=SNAPSHOT, patient=[f"Patient/{a}", f"Patient/{b}",
+    _, got, outcomes = export(base, gid, provider, exportType=SNAPSHOT, patient=[f"Patient/{a}", f"Patient/{b}",
                                                                        "Patient/not-a-member"])
     compare_export(checks, "export: patient parameter", gid, gold.member_data({a, b}), got)
     checks.add("export: patient parameter", "non-member reported", True,
@@ -267,18 +293,18 @@ def check_provider_exports(base: str, upstream: str, gold: Gold, checks: Checks,
 
     # An opt-out recorded after the list was built.
     gid2 = groups[1]
-    members2 = sorted(r.removeprefix("Patient/") for r in group_members(base, gid2))
+    members2 = sorted(r.removeprefix("Patient/") for r in group_members(base, gid2, provider_client(gid2)))
     x = members2[0]
     consent = gold.resources("gold.fhir_provider_consent", "true LIMIT 1")
     consent = next(iter(consent.values()))
     consent.update({"id": "check-opt-out", "patient": {"reference": f"Patient/{x}"},
                     "performer": [{"reference": f"Patient/{x}"}]})
     consent["provision"]["period"] = {"start": date.today().isoformat()}
-    status, _, _ = call("PUT", f"{upstream}/Consent/check-opt-out", consent)
+    status, _, _ = call("PUT", f"{base}/Consent/check-opt-out", consent, client=ADMIN)
     try:
-        manifest, got, outcomes = export(base, gid2, exportType=SNAPSHOT)
+        manifest, got, outcomes = export(base, gid2, provider_client(gid2), exportType=SNAPSHOT)
     finally:
-        call("DELETE", f"{upstream}/Consent/check-opt-out")
+        call("DELETE", f"{base}/Consent/check-opt-out", client=ADMIN)
     day = datetime.fromisoformat(manifest["transactionTime"]).date()
     expected_members = set(members2) - {x} - gold.opted_out_on(day)
     checks.add("export: opt-out at execution", f"{gid2} without Patient/{x}",
@@ -289,29 +315,30 @@ def check_provider_exports(base: str, upstream: str, gold: Gold, checks: Checks,
     checks.add("export: opt-out at execution", "reported", True, any(f"Patient/{x}" in json.dumps(o) for o in outcomes))
 
     # provider-download records the transmission; provider-delta leaves it out.
-    manifest, _, _ = export(base, gid, exportType=DOWNLOAD, patient=[f"Patient/{a}"])
-    after = group_members(base, gid)
+    manifest, _, _ = export(base, gid, provider, exportType=DOWNLOAD, patient=[f"Patient/{a}"])
+    after = group_members(base, gid, provider)
     sent = [e.get("valueDateTime") for e in after[f"Patient/{a}"].get("extension", []) if e["url"] == LAST_TRANSMISSION]
     checks.add("export: provider-download", "lastTransmitted recorded", [manifest["transactionTime"]], sent)
     checks.add("export: provider-download", "other members not marked", 0,
                sum(1 for ref, m in after.items() if ref != f"Patient/{a}"
                    and any(e["url"] == LAST_TRANSMISSION for e in m.get("extension", []))))
-    manifest, got, _ = export(base, gid, exportType=DELTA)
+    manifest, got, _ = export(base, gid, provider, exportType=DELTA)
     day = datetime.fromisoformat(manifest["transactionTime"]).date()
     expected_members = set(members) - {a} - gold.opted_out_on(day)
     compare_export(checks, "export: provider-delta", gid, gold.member_data(expected_members), got)
 
     # Refusals.
     status, _, _ = call("POST", f"{base}/Group/{gid}/$davinci-data-export", parameters(exportType=P2P),
-                        {"Prefer": "respond-async"})
+                        {"Prefer": "respond-async"}, provider)
     checks.add("refusals", "payertopayer on an attribution list", 400, status)
-    status, _, _ = call("GET", f"{base}/Group/{gid}/$davinci-data-export")
+    status, _, _ = call("GET", f"{base}/Group/{gid}/$davinci-data-export", client=provider)
     checks.add("refusals", "GET $davinci-data-export", 405, status)
-    status, _, _ = call("POST", f"{base}/Group/{gid}/$davinci-data-export", parameters(exportType=SNAPSHOT))
+    status, _, _ = call("POST", f"{base}/Group/{gid}/$davinci-data-export", parameters(exportType=SNAPSHOT),
+                        client=provider)
     checks.add("refusals", "without Prefer: respond-async", 400, status)
-    status, _, _ = call("GET", f"{base}/Group/{gid}/$export", headers={"Prefer": "respond-async"})
+    status, _, _ = call("GET", f"{base}/Group/{gid}/$export", headers={"Prefer": "respond-async"}, client=provider)
     checks.add("refusals", "HAPI Group $export", 400, status)
-    status, _, _ = call("GET", f"{base}/$export", headers={"Prefer": "respond-async"})
+    status, _, _ = call("GET", f"{base}/$export", headers={"Prefer": "respond-async"}, client=provider)
     checks.add("refusals", "HAPI system $export", 400, status)
     return timings
 
@@ -443,7 +470,7 @@ def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
     request, expected = build_request(gold)
     MESSAGES.mkdir(parents=True, exist_ok=True)
     (MESSAGES / "bulk-member-match-in.json").write_text(json.dumps(request, indent=1))
-    status, _, response = call("POST", f"{base}/Group/$bulk-member-match", request)
+    status, _, response = call("POST", f"{base}/Group/$bulk-member-match", request, client=NEW_PAYER)
     checks.add("$bulk-member-match", "HTTP status", 200, status)
     if status != 200:
         return {}
@@ -461,19 +488,19 @@ def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
     checks.add("$bulk-member-match", "MatchedMembers: our members", sorted(matched),
                sorted(m["entity"]["reference"] for m in match_group.get("member", [])))
     gid = match_group.get("id")
-    stored = group_members(base, gid) if gid else {}
+    stored = group_members(base, gid, NEW_PAYER) if gid else {}
     checks.add("$bulk-member-match", "match group stored on the server", sorted(matched), sorted(stored))
     status, _, bundle = call("GET", f"{base}/Group?identifier="
                                     f"{urllib.parse.quote(NEW_PAYER_ID['system'] + '|' + NEW_PAYER_ID['value'])}"
-                                    "&code=match&_elements=id&_count=500")
+                                    "&code=match&_elements=id&_count=500", client=NEW_PAYER)
     checks.add("$bulk-member-match", "match group found by the requesting payer's identifier", True,
                gid in {e["resource"]["id"] for e in bundle.get("entry", [])})
 
     status, _, _ = call("POST", f"{base}/Group/{gid}/$davinci-data-export", parameters(exportType=SNAPSHOT),
-                        {"Prefer": "respond-async"})
+                        {"Prefer": "respond-async"}, NEW_PAYER)
     checks.add("refusals", "provider-snapshot on a match group", 400, status)
     started = time.time()
-    manifest, got, _ = export(base, gid, exportType=P2P)
+    manifest, got, _ = export(base, gid, NEW_PAYER, exportType=P2P)
     seconds = round(time.time() - started, 1)
     requested_at = datetime.fromisoformat(manifest["transactionTime"])
     cutoff = requested_at.date().replace(year=requested_at.year - 5)
@@ -500,7 +527,7 @@ def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
     first_constrained = next(n for n, (k, _) in expected.items() if k == "consentconstraint")
     for n, want_status in ((first_match, 200), (first_nomatch, 422), (first_constrained, 422)):
         body = {"resourceType": "Parameters", "parameter": by_n[n]["part"]}
-        status, _, resp = call("POST", f"{base}/Patient/$member-match", body)
+        status, _, resp = call("POST", f"{base}/Patient/$member-match", body, client=NEW_PAYER)
         checks.add("$member-match", f"{expected[n][0]} -> HTTP", want_status, status)
         if want_status == 200:
             got_ref = next((p["valueReference"]["reference"] for p in resp.get("parameter", [])
@@ -514,10 +541,9 @@ def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default=DEFAULT_BASE, help="FHIR gateway base URL")
-    ap.add_argument("--upstream", default=DEFAULT_UPSTREAM, help="Provider Access FHIR server base URL")
     ap.add_argument("--groups", type=int, default=3, help="attribution lists to export")
     args = ap.parse_args()
-    base, upstream = args.base.rstrip("/"), args.upstream.rstrip("/")
+    base = args.base.rstrip("/")
     for _ in range(60):
         try:
             if call("GET", f"{base}/metadata")[0] == 200:
@@ -538,7 +564,7 @@ def main() -> None:
         check_counts(base, gold, checks)
         check_no_financial_data(base, gold, checks)
         check_attribution(base, gold, checks, groups)
-        timings = check_provider_exports(base, upstream, gold, checks, groups)
+        timings = check_provider_exports(base, gold, checks, groups)
         p2p = check_payer_to_payer(base, gold, checks)
     finally:
         con.close()
@@ -547,7 +573,7 @@ def main() -> None:
     for r in checks.results:
         by_group[r["group"]][0] += r["passed"]
         by_group[r["group"]][1] += 1
-    report = {"gateway": base, "upstream": upstream, "software": metadata.get("software"),
+    report = {"gateway": base, "software": metadata.get("software"),
               "snapshot_export_seconds": timings, "payer_to_payer": p2p,
               "passed": sum(r["passed"] for r in checks.results), "total": len(checks.results),
               "groups": {g: {"passed": p, "total": t} for g, (p, t) in by_group.items()},

@@ -76,6 +76,7 @@ Reproducibility); every link, merge and review decision stayed the same.
 | Provider Access data conformance (CARIN Basis, PDex Group and Consent) | `make fhir-validate-provider` | Provider Access |
 | Provider Access and Payer-to-Payer APIs against gold | `make fhir-provider-api-check` (`data/fhir_provider_api.json`) | Provider Access |
 | Payer-to-Payer messages conformance (PDex) | `make fhir-validate-p2p`              | Provider Access |
+| SMART authorization of both APIs (what each client may see) | `make fhir-security-check` (`data/fhir_security.json`) | API security |
 
 ## Data quality
 
@@ -525,6 +526,34 @@ cannot resolve, and the PDex example request fails with the same error. The firs
 the request found three faults in the check itself: the coverages lacked `relationship`, three
 coverages to match had no member ID (HRex requires one, so those cases now carry one this payer
 does not know), and the resources had no narrative.
+
+**API security** (`make fhir-up fhir-publish fhir-security-check`, run on 2026-11-12, from a clean
+environment). Both APIs now require a SMART access token, and the HAPI servers are reachable only
+through the gateways. The publish and the two API checks above ran through the gateways with
+tokens and gave the same results (143 of 143 and 129 of 129); the publish took as long as before
+(2 min 40 s locally, both servers at once). Then 73 checks of the authorization itself, all passed:
+
+| Checks                                                                                  | Passed  |
+|-----------------------------------------------------------------------------------------|--------:|
+| Discovery: `.well-known/smart-configuration` and the CapabilityStatement security of both APIs | 6 / 6 |
+| Authentication: no token, a malformed one, one signed by another key, one for the other API (401 each); no FHIR server on host port 8091 | 9 / 9 |
+| Token endpoint (Backend Services): a valid assertion; an unknown client, another client's key, a replayed `jti`, another audience, an assertion valid for an hour (401); a scope the client may not have (`invalid_scope`); a narrower scope granted | 8 / 8 |
+| Member login: a wrong birth date, an unregistered redirect URI, no PKCE, a denial, a wrong PKCE verifier, a code used twice; the patient context and `id_token` | 9 / 9 |
+| Member app: its Patient, Coverage and claims equal to gold (with and without `patient`, across pages); another member's data by search, read and chain, a write, `$everything`, bulk export and Group refused; Organization readable; a token with fewer scopes; refresh token rotation | 17 / 17 |
+| Provider: an attributed member's Patient, Coverage and claims (without financial data) equal to gold; a member who opted out, a member not attributed (search and read by ID), a search without a member or naming two, another provider's list (read, search, export), `$bulk-member-match`, Consent and a write refused; an opt-out recorded during the check refused the next search, and removing it allowed it again; an export job invisible to another provider | 17 / 17 |
+| Other payer: the new payer matches a member; the other payer cannot read, search or export that match group, search Patient or read an attribution list; with a consent naming the new payer as the recipient, its own request leaves the member consent-constrained | 7 / 7 |
+
+The member who opted out in the provider checks had opted out before the attribution lists were
+built, so their list already left them out and the refusal comes from the attribution rule; the
+opt-out rule itself is shown by the opt-out recorded during the check, which the gateway applied to
+the very next search. This is the gap of the previous version closed: a plain search for an
+opted-out member's claims is now refused.
+
+To check that the checks can fail, the gateway was changed in three places (the opt-out no longer
+subtracted from a provider's members, the answers no longer checked, a member's search allowed to
+name another member): 7 checks failed (four of the member app's refusals, the opted-out member's
+Patient, the unattributed member's claim by ID, and the opt-out recorded during the check), and all
+73 passed again with the gateway restored.
 
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
 removed from the exported copies; the CARIN package is loaded only for its code systems): 0

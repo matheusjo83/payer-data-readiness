@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-all fhir-up fhir-publish fhir-api-check fhir-provider-api-check docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
 	docker compose up -d --build --wait legacy-db lakehouse-catalog
@@ -92,14 +92,21 @@ fhir-validate-p2p: ## Validate the Payer-to-Payer $$bulk-member-match request an
 fhir-validate-all: ## The four validations above in one HL7 validator run (loading the packages takes most of a run), one summary per mode; after fhir-provider-api-check (Java)
 	$(PY) fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer --top 60 --tx https://tx.fhir.org
 
-fhir-up:   ## Start the HAPI FHIR servers empty (recreated each time) and the gateway: Patient Access at http://localhost:8090/fhir, Provider Access and Payer-to-Payer at http://localhost:8092/fhir
-	docker compose --profile api up -d --force-recreate fhir-server fhir-server-provider fhir-gateway
+fhir-up:   ## Start the HAPI FHIR servers empty (recreated each time), the SMART authorization server (http://localhost:8093) and the gateways: Patient Access at http://localhost:8090/fhir, Provider Access and Payer-to-Payer at http://localhost:8092/fhir
+	mkdir -p data/fhir_auth
+	docker compose --profile api up -d --build --force-recreate fhir-server fhir-server-provider fhir-auth fhir-gateway-patient fhir-gateway
 
-fhir-publish: ## Load the gold FHIR resources (and the CARIN/PDex search parameters) into both FHIR servers
+fhir-clients: ## Register the SMART clients (the member app, one backend client per provider, two payers, the admin clients) and their keys in data/fhir_auth/ (after dbt)
+	$(PY) fhir/auth/clients.py
+
+fhir-publish: fhir-clients ## Load the gold FHIR resources (and the CARIN/PDex search parameters) into both FHIR servers, through the gateways with the admin clients
 	$(PY) fhir/publish.py
 
 fhir-api-check: ## Check the FHIR server against gold: counts, CARIN/PDex searches, Bulk $$export (writes data/fhir_api.json)
 	$(PY) fhir/api_check.py
+
+fhir-security-check: ## Check the SMART authorization of both APIs: discovery, tokens, a member's compartment, attribution and opt-outs, other payers (writes data/fhir_security.json)
+	$(PY) fhir/security_check.py
 
 fhir-provider-api-check: ## Check the Provider Access and Payer-to-Payer APIs (gateway) against gold: attribution, $$davinci-data-export, opt-outs, $$bulk-member-match (writes data/fhir_provider_api.json)
 	$(PY) fhir/provider_api_check.py
