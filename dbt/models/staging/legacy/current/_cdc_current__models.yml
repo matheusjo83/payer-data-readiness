@@ -344,3 +344,45 @@ models:
         description: 'Loader run that wrote the latest change.'
       - name: _snapshot_lsn
         description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'
+  - name: cdc_current__mbr_cnsnt
+    description: >
+      Current state of the legacy member data-sharing choices (mbr_cnsnt), maintained incrementally from its CDC
+      change table: one row per primary key, the latest change, merged by key from the _lsn watermark
+      (deleted keys as tombstones). Equal to a full rebuild (assert_cdc_current_state_matches_full).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [cnsnt_id]
+    columns:
+      - name: cnsnt_id
+        description: 'Consent record ID.'
+        data_tests: [not_null]
+      - name: mbr_id
+        description: 'Legacy member ID.'
+      - name: cnsnt_typ
+        description: 'Type of choice: PAO, opted out of the Provider Access API.'
+      - name: eff_dt
+        description: 'Date the choice took effect (YYYYMMDD).'
+      - name: term_dt
+        description: "Date it ended, when the member opted back in (YYYYMMDD; '99991231' while in force)."
+      - name: upd_ts
+        description: 'Last update of the row in the source.'
+      - name: _op
+        description: 'Operation of the latest change: S snapshot, I insert, U update, D delete (a tombstone, which the staging models filter out).'
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['S', 'I', 'U', 'D']
+      - name: _lsn
+        description: 'Source log position of the latest change; the highest one in the table is the watermark of the next incremental run.'
+        data_tests: [not_null]
+      - name: _seq
+        description: 'Position within a bulk WAL record, for rows that share an _lsn.'
+      - name: _commit_ts
+        description: 'Source commit time of the latest change (null for snapshot rows).'
+      - name: _loaded_at
+        description: 'Time the latest change arrived in bronze.'
+      - name: _run_id
+        description: 'Loader run that wrote the latest change.'
+      - name: _snapshot_lsn
+        description: 'Log position of the snapshot this row was built from; a different one in the change table makes the model rebuild.'

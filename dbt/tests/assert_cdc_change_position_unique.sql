@@ -1,7 +1,7 @@
 -- Every captured change has a unique position in the log: (_lsn, _seq).
 -- Rows written by one bulk WAL record (e.g. COPY) share an _lsn and are told
 -- apart by _seq. A duplicate means a batch was applied twice.
-{% set tables = ['pln', 'mbr_mstr', 'elig_span', 'prv', 'clm_hdr', 'clm_ln', 'pa_req'] %}
+{% set tables = ['pln', 'mbr_mstr', 'elig_span', 'prv', 'clm_hdr', 'clm_ln', 'pa_req', 'mbr_cnsnt'] %}
 
 with changes as (
     {% for t in tables %}

@@ -258,6 +258,102 @@ requests: the resources are validated before they are published.
 - **Orchestration.** Publishing is a `make` step, run in CI after the validations; the Airflow DAGs
   do not publish, so after a refresh in Airflow the server is updated with `make fhir-publish`.
 
+## Provider Access and Payer-to-Payer APIs
+
+CMS-0057-F asks for two more APIs, both due on January 1, 2027: the **Provider Access API**, with
+which an in-network provider reads the data of the members attributed to them, and the
+**Payer-to-Payer API**, with which a member's new health plan asks the old one for their data.
+Both exclude provider remittances and enrollee cost-sharing. They follow Da Vinci PDex STU 2.1.0,
+the version of the Prior Authorization profile already in use (PDex 2.2.0 has since added a
+second Provider Access workflow, `$provider-member-match`, and returns the Payer-to-Payer result
+as Group NDJSON; neither is implemented here).
+
+```
+gold (dbt) ── publish ─► fhir-server-provider (HAPI, :8091) ◄── fhir-gateway (:8092) ◄── providers, new payers
+                         claims without financial data       $davinci-data-export
+                         prior authorizations, Patient,       $bulk-member-match, $member-match
+                         Coverage, Organization,              everything else passed through
+                         attribution lists, opt-outs
+```
+
+- **Data without financial elements.** `gold.fhir_explanation_of_benefit_basis` derives each claim
+  from `gold.fhir_explanation_of_benefit` by removing `total`, `payment`, `item.net` and every
+  adjudication that carries an amount, and declares the CARIN Blue Button 2.1.0 *Basis* profile of
+  its type, which the IG describes as the full profile with only the financial requirements
+  removed and PDex names for these APIs. Deriving instead of mapping again keeps the two from
+  drifting apart; a dbt test checks that no amount is left and that the items, diagnoses,
+  identifiers, patient and coverage are those of the full claim. The
+  Basis claims keep the IDs of the full ones, so they go to a second HAPI server
+  (`fhir-server-provider`), and the Patient Access server keeps the full claims.
+- **Opt-outs.** Members may opt out of the Provider Access API. The legacy database records it in
+  a new table, `mbr_cnsnt` (type PAO, with the day it took effect and, when the member opted back
+  in, the day it ended), captured by CDC like the others. The generator opts out 3% of the
+  members, 15% of whom later opt back in, and the activity simulator changes opt-outs while CDC
+  runs. Each one becomes a PDex Provider Access Consent (`gold.fhir_provider_consent`, provision
+  `deny`, the period it was in force).
+- **Attribution.** CMS requires an attribution process and PDex lets the payer use claims to find
+  treatment relationships. `gold.provider_attribution` attributes a member to a provider who, in
+  the 24 months before the reference date, billed an in-network claim that was not voided or
+  requested a prior authorization for them, when the member is covered on the reference date.
+  `gold.fhir_provider_group` turns each provider's list into a PDex Provider Group (an ATR
+  attribution list, status `final`): the members with their coverage and the attributed provider,
+  without the ones who opted out, whose number goes in the `members-opted-out` extension. The
+  payer is the `managingEntity` and the provider the characteristic, by reference and NPI, so a
+  provider finds their list with `Group?identifier=<NPI>`.
+- **The gateway.** HAPI implements neither `$davinci-data-export` nor `$bulk-member-match`, so
+  `fhir/gateway/gateway.py` (service `fhir-gateway`, the standard library on the official Python
+  image) sits in front of the second server. For an export it runs HAPI's Group `$export` (with
+  `_type`, `_typeFilter`, `_since`), then filters what comes back: only the members named in
+  `patient` (a non-member is reported in an OperationOutcome), without members whose opt-out is in
+  force at that moment (PDex: the consent status is checked "at the time of execution", so an
+  opt-out recorded after the list was built applies), only resources updated up to `_until`, and
+  only Organizations that the exported resources reference. HAPI ignores `patient` on a Group
+  export and adds the Group itself, which is why the gateway filters instead of passing them on.
+  The `exportType` sets the rest: `provider-snapshot` (the default), `provider-download` (the same
+  data, recorded on each member of the Group as transmitted: last time, types and filters, which
+  PDex requires) and `provider-delta` (only what changed since each member's last transmission) on
+  an attribution list; `payertopayer` on a match group, which keeps claims with a service date in
+  the 5 years before the request and prior authorizations that are pending or were decided in the
+  last 12 months. HAPI's own `$export` is refused through the gateway, since it would skip the
+  opt-outs; every other request is passed through, with the server's URLs rewritten to the
+  gateway's.
+- **Member match.** `$bulk-member-match` takes one MemberBundle per member (HRex demographics, the
+  coverage the new payer says the member had here, the member's consent) and answers with three
+  PDex Groups: matched, not matched and consent-constrained. The match uses the member ID on the
+  coverage, confirmed by the birth date and the family or given name (a changed family name
+  still matches); a member ID this payer does not know falls back to a unique member with the same
+  family name, given name, birth date and gender. No candidate or more than one is no match, as is
+  a coverage with another payer. A matched member is consent-constrained unless the consent is
+  active, in force today, names this payer as the source and a recipient, and asks for all data:
+  this payer does not label sensitive data, so a request for non-sensitive data only cannot be
+  complied with. The match group is stored on the server, identified by the requesting payer, and
+  that payer exports it with `exportType=payertopayer`. `Patient/$member-match` (HRex) does the
+  same for one member, with a 422 when there is no unique match or the consent cannot be honored.
+- **Validation.** `make fhir-validate-provider` validates a sample of each Basis profile, the
+  attribution lists and the opt-outs (in force and ended), with their references in the Bundle and
+  codes checked by tx.fhir.org, against CARIN 2.1.0 and PDex 2.1.0 together. `make
+  fhir-validate-p2p` validates the `$bulk-member-match` request the check sends and the gateway's
+  response. Three warnings come from conflicts between PDex and the guides it builds on (the
+  Consent actor role, the Provider Group characteristic code, a Coverage that satisfies both
+  profiles the ATR coverage reference allows), and one error from HRex itself (its consent policy
+  codes are HTML page anchors the validator cannot resolve; the IG's own example fails the same
+  way). They are counted apart with the reason, like the known CARIN warnings.
+- **Check.** `fhir/provider_api_check.py` (`make fhir-provider-api-check`) calls the gateway as a
+  provider and as a new payer would and compares every answer with gold: counts; claims equal to
+  their Basis resource; Group search by NPI; snapshot exports of three attribution lists, whose
+  resources must be exactly the members' data and equal gold apart from `meta`; the `patient`
+  parameter; an opt-out put on the server after the list was built; a download followed by a
+  delta; the requests it must refuse; a `$bulk-member-match` request built from gold, with a case
+  for every rule above; the Payer-to-Payer export of the resulting match group; and
+  `$member-match`. It resets the attribution lists it exports from gold first, so it can run
+  again.
+- **What is not done.** Nothing authenticates the caller (SMART Backend Services, which PDex
+  requires, is on the backlog), so any client can export any list, and a provider could read an
+  opted-out member through a plain search: only the bulk export enforces the opt-out. The
+  Payer-to-Payer consent is checked when the match is made, not again at export. There is no
+  clinical (US Core) data to share, since the legacy source has only claims, and no drug prior
+  authorizations, which both APIs exclude. `$bulk-member-match` answers synchronously.
+
 ## The PBM feed and identity resolution
 
 A second source sends the same people under different identifiers. A pharmacy benefit manager

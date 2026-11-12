@@ -1,11 +1,11 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-up fhir-publish fhir-api-check docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-up fhir-publish fhir-api-check fhir-provider-api-check docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
 	docker compose up -d --build --wait legacy-db lakehouse-catalog
 
-down:      ## Stop containers (including Airflow and the FHIR server)
+down:      ## Stop containers (including Airflow and the FHIR servers)
 	docker compose --profile airflow --profile api down
 
 reset:     ## Stop containers and delete all local data
@@ -83,14 +83,23 @@ fhir-validate-carin: ## Validate a sample against the CARIN Blue Button IG 2.1.0
 fhir-validate-pdex: ## Validate the prior authorizations (one sample per decision) against the Da Vinci PDex IG 2.1.0, codes checked by tx.fhir.org (Java)
 	$(PY) fhir/validate.py --ig pdex --top 60 --tx https://tx.fhir.org
 
-fhir-up:   ## Start the HAPI FHIR server empty (recreated each time), at http://localhost:8090/fhir
-	docker compose --profile api up -d --force-recreate fhir-server
+fhir-validate-provider: ## Validate the Provider Access / Payer-to-Payer data: claims without financial data (CARIN Basis), attribution lists and opt-outs (PDex), codes checked by tx.fhir.org (Java)
+	$(PY) fhir/validate.py --ig provider-access --sample 20 --top 60 --tx https://tx.fhir.org
 
-fhir-publish: ## Load the gold FHIR resources (and the CARIN/PDex search parameters) into the FHIR server
+fhir-validate-p2p: ## Validate the Payer-to-Payer $$bulk-member-match request and response saved by fhir-provider-api-check (PDex 2.1.0, Java)
+	$(PY) fhir/validate.py --ig payer-to-payer --top 60 --tx https://tx.fhir.org
+
+fhir-up:   ## Start the HAPI FHIR servers empty (recreated each time) and the gateway: Patient Access at http://localhost:8090/fhir, Provider Access and Payer-to-Payer at http://localhost:8092/fhir
+	docker compose --profile api up -d --force-recreate fhir-server fhir-server-provider fhir-gateway
+
+fhir-publish: ## Load the gold FHIR resources (and the CARIN/PDex search parameters) into both FHIR servers
 	$(PY) fhir/publish.py
 
 fhir-api-check: ## Check the FHIR server against gold: counts, CARIN/PDex searches, Bulk $$export (writes data/fhir_api.json)
 	$(PY) fhir/api_check.py
+
+fhir-provider-api-check: ## Check the Provider Access and Payer-to-Payer APIs (gateway) against gold: attribution, $$davinci-data-export, opt-outs, $$bulk-member-match (writes data/fhir_provider_api.json)
+	$(PY) fhir/provider_api_check.py
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

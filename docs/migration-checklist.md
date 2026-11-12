@@ -157,6 +157,16 @@ platform.
 - [ ] **Use stable identifiers and consistent references** between resources.
   *In this repo:* `Patient/<member_id>`, `Coverage/cov-<eligibility_id>`, `Organization/payer` and
   `Organization/<provider_id>`.
+- [ ] **Derive restricted views from the full resource, not from a second mapping.** When an API
+  must leave data out (CMS-0057-F's Provider Access and Payer-to-Payer APIs exclude remittances
+  and cost-sharing), remove it from the resource the other APIs serve, and test that what is left
+  is unchanged.
+  *In this repo:* `gold.fhir_explanation_of_benefit_basis` (CARIN Basis profiles) and
+  `dbt/tests/assert_basis_eob_has_no_amounts.sql`.
+- [ ] **Treat consent as source data, checked when the data leaves.** Capture opt-outs and opt-ins
+  like any other table, and check them when an export runs, not only when a list is built.
+  *In this repo:* the legacy table `mbr_cnsnt` (CDC), `gold.fhir_provider_consent`, and the
+  gateway's check at export time, proven by an opt-out added after the list was built.
 
 ## 8. Resolve identities before the API
 

@@ -162,6 +162,31 @@ models:
       - name: updated_at
         description: Last update of the legacy row.
 
+  - name: stg_legacy__consents
+    description: >
+      Member data-sharing choices: opt-outs of the Provider Access API (CMS-0057-F), with the
+      day each took effect and, when the member opted back in, the day it ended.
+    columns:
+      - name: consent_id
+        description: Legacy consent record ID (`cnsnt_id`).
+        data_tests: [unique, not_null]
+      - name: member_id
+        description: "{{ doc('member_id') }}"
+        data_tests: [not_null]
+      - name: consent_type
+        description: provider_access_opt_out (legacy type PAO).
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['provider_access_opt_out']
+      - name: effective_date
+        description: Day the opt-out took effect.
+        data_tests: [not_null]
+      - name: end_date
+        description: Day the member opted back in (the opt-out no longer applies from this day); null while in force.
+      - name: updated_at
+        description: Last update of the legacy row.
+
   - name: stg_legacy__eligibility
     description: Member coverage spans (which plan covered a member, and when).
     columns:

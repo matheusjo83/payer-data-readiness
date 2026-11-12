@@ -63,7 +63,11 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   profile, to fix the legacy generator (requests inside the member's coverage, a requested
   amount) and to code denials with X12's A3, which no open source could confirm. For the
   storage, Matheus chose DuckLake (a Postgres catalog with Parquet data) and an incremental CDC
-  current state merged by key from an `_lsn` watermark, with deletes applied.
+  current state merged by key from an `_lsn` watermark, with deletes applied. After v3.0.0,
+  Matheus chose the Provider Access and Payer-to-Payer APIs as the next step (keeping the other
+  options in the backlog below) and, for them, a gateway in front of HAPI for the Da Vinci PDex
+  operations HAPI lacks, the claims without financial data as a gold model served from a second
+  HAPI server, the opt-outs as a legacy table captured by CDC, and PDex 2.1.0.
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -81,7 +85,10 @@ Legacy payer DB (Postgres) ──── CDC (WAL) ─────┤   (raw)    
                                 (logged)       │                 │    Identity resolution
 PBM files (pipe-delimited) ──── file load ─────┘                 │
                                                                  └─ publish ─► HAPI FHIR server
-                                                                               (search, Bulk $export)
+                                                                 │             (Patient Access: search, Bulk $export)
+                                                                 └─ publish ─► HAPI FHIR server ◄─ FHIR gateway
+                                                                               (Provider Access, Payer-to-Payer:
+                                                                                no financial data; PDex operations)
           └─── orchestrated by Airflow (CDC sync, slot monitor, FHIR and PBM loads, dbt, coverage) ───┘
 ```
 
@@ -104,7 +111,8 @@ Runs fully local, at zero cost: **Postgres** (legacy source, Docker, with the **
 decoding plugin for CDC), **DuckDB** with **DuckLake** (lakehouse engine and format: a Postgres
 catalog, Parquet data), **dbt** (transformations, tests, lineage),
 **Synthea** (synthetic FHIR data), **Splink** (probabilistic record linkage), **Python** (ingestion),
-**Apache Airflow** (orchestration, Docker), **HAPI FHIR** (the FHIR API, Docker).
+**Apache Airflow** (orchestration, Docker), **HAPI FHIR** (the FHIR APIs, Docker), and a small
+**Python** gateway (standard library) for the Da Vinci PDex operations HAPI does not implement.
 
 ## Quickstart
 
@@ -133,19 +141,23 @@ make conformance          # run the official SQL on FHIR v2 test suite against t
 make views                # recompile fhir/view_definitions/*.json into dbt macros (after editing a view)
 make fhir-validate-carin  # validate a sample against the CARIN Blue Button 2.1.0 profiles, codes checked by tx.fhir.org (HL7 validator, Java)
 make fhir-validate-pdex   # validate the prior authorizations against Da Vinci PDex 2.1.0 (HL7 validator, Java)
+make fhir-validate-provider  # validate the Provider Access data: claims without financial data (CARIN Basis), attribution lists and opt-outs (PDex)
 make fhir-validate        # validate a sample against base FHIR R4 only
 ```
 
-FHIR API:
+FHIR APIs:
 
 ```bash
-make fhir-up              # start an empty HAPI FHIR server at http://localhost:8090/fhir
-make fhir-publish         # load the gold FHIR resources into it
-make fhir-api-check       # check it against gold: counts, CARIN/PDex searches, Bulk $export
+make fhir-up              # start the FHIR servers empty: Patient Access at http://localhost:8090/fhir,
+                          #   Provider Access and Payer-to-Payer (through the gateway) at http://localhost:8092/fhir
+make fhir-publish         # load the gold FHIR resources into both
+make fhir-api-check       # check the Patient Access server against gold: counts, CARIN/PDex searches, Bulk $export
+make fhir-provider-api-check  # check the gateway against gold: attribution, $davinci-data-export, opt-outs, $bulk-member-match
+make fhir-validate-p2p    # validate the Payer-to-Payer request and response the check saved (PDex 2.1.0)
 ```
 
-The legacy schema gained columns in Phase 6, and `pa_req.req_amt` with the FHIR API. A database
-created before either needs `make reset`
+The legacy schema gained columns in Phase 6, `pa_req.req_amt` with the FHIR API and the table
+`mbr_cnsnt` with the Provider Access API. A database created before any of them needs `make reset`
 (which deletes the local data) and the Quickstart again.
 
 To watch change data capture at work, run the loader and the activity simulator side by side,
@@ -169,11 +181,12 @@ result against a full rebuild and against Postgres.
 
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up fhir-up seed pbm synthea ingest
-slot-drill dbt conformance fhir-validate-carin fhir-validate-pdex fhir-publish fhir-api-check
-cdc-check` on a clean runner. The run fails if the slot drill fails, if a model or data test fails, if any
-shareable SQL on FHIR test fails, if the HL7 validator reports an error against the CARIN Blue
-Button or PDex profiles in the samples, if a check of the FHIR server against gold fails, or if
-the incremental current state differs from a full rebuild or from Postgres.
+slot-drill dbt conformance fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-publish
+fhir-api-check fhir-provider-api-check fhir-validate-p2p cdc-check` on a clean runner. The run fails
+if the slot drill fails, if a model or data test fails, if any shareable SQL on FHIR test fails, if
+the HL7 validator reports an error against the CARIN Blue Button or PDex profiles in the samples or
+the Payer-to-Payer messages, if a check of a FHIR API against gold fails, or if the incremental
+current state differs from a full rebuild or from Postgres.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -192,6 +205,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | Identity resolution | PBM cardholders linked to members with 100% precision and 97.9% recall against ground truth (deterministic baseline: 99.5% and 93.4%), 98.9% after the review queue was worked; 93 of 94 duplicate cardholder IDs within the PBM merged, none wrongly |
 | FHIR validation     | 0 errors and 0 warnings on a 1,600-resource sample against the CARIN Blue Button 2.1.0 profiles and on 547 prior authorizations against Da Vinci PDex 2.1.0, references resolved, codes checked by tx.fhir.org (warnings the data cannot remove counted apart, with their reason); 1,000 of 1,000 failed CARIN before remediation |
 | FHIR API            | 42,550 resources (32,224 ExplanationOfBenefit, 3,000 of them prior authorizations) served by HAPI FHIR; 143 of 143 checks of counts, CARIN and PDex searches and a Bulk $export passed, every exported resource equal to gold |
+| Provider Access and Payer-to-Payer | 300 attribution lists from claims, 89 opted-out members left out and checked again at export; claims without financial data valid against the CARIN Basis profiles, attribution lists and opt-outs against PDex 2.1.0 (0 errors); 129 of 129 checks through the PDex gateway passed, including an opt-out added after the list was built and a 22-member `$bulk-member-match` |
 | Terminology         | Every ICD-10-CM, NDC and place of service code in the 29,224 exported claims valid on its service date (CMS and FDA releases); CPT, NUBC and NCPDP codes counted as unverified |
 
 ## Roadmap
@@ -209,6 +223,14 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Cleanup:** every CI, Synthea, Splink and validator warning traced to its cause and fixed, or counted apart when the data cannot remove it
 - [x] **FHIR API:** a HAPI FHIR server loaded from gold (search and Bulk `$export`), with prior authorization as PDex ExplanationOfBenefit
 - [x] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
+- [x] **Provider Access and Payer-to-Payer APIs:** attribution lists from claims, opt-outs captured by CDC and checked at export, claims without financial data (CARIN Basis), and a gateway implementing the PDex `$davinci-data-export`, `$bulk-member-match` and HRex `$member-match`
+
+Backlog (not started):
+
+- [ ] **Prior authorization exchange:** Da Vinci PAS, CRD and DTR, from the provider's request to the payer's decision
+- [ ] **API security:** SMART on FHIR for the Patient Access API and SMART Backend Services for the provider and payer APIs
+- [ ] **Observable data quality:** the gold metrics over time (coverage, CDC latency, conformance, linkage) on a dashboard
+- [ ] **Scale:** many more members, measuring DuckLake and Splink as the data grows
 
 ## Project structure
 
@@ -218,7 +240,7 @@ scripts/       Synthea download and configuration, PBM feed generator, simulated
 ingestion/     Lakehouse connection (DuckLake) and bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
 dbt/           Silver and gold models (including the Splink Python models), seeds (with the review decisions), tests, lineage
 airflow/       Airflow image and DAGs
-fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base, CARIN, PDex), FHIR server publish and API checks
+fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base, CARIN, PDex), FHIR server publish, the PDex gateway and API checks
 docs/          Technical write-up, migration checklist, architecture details and results
 .github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request)
 ```

@@ -91,3 +91,12 @@ CREATE TABLE pa_req (             -- prior authorization requests
     req_amt     NUMERIC(12,2),    -- estimated cost of the requested service
     upd_ts      TIMESTAMP
 );
+
+CREATE TABLE mbr_cnsnt (          -- member data-sharing choices (CMS-0057-F)
+    cnsnt_id    VARCHAR(15) PRIMARY KEY,
+    mbr_id      VARCHAR(12),
+    cnsnt_typ   CHAR(3),          -- PAO: opted out of the Provider Access API
+    eff_dt      VARCHAR(8),
+    term_dt     VARCHAR(8),       -- '99991231' while in force; set when the member opts back in
+    upd_ts      TIMESTAMP
+);

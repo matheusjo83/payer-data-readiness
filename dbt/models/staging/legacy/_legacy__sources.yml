@@ -25,3 +25,6 @@ sources:
         description: Claim lines. No foreign key to the header in the source.
       - name: pa_req
         identifier: legacy_pa_req_changes
+      - name: mbr_cnsnt
+        identifier: legacy_mbr_cnsnt_changes
+        description: Member data-sharing choices (Provider Access API opt-outs, type PAO).

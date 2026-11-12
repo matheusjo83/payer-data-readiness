@@ -44,6 +44,10 @@ every request an amount. Both come from a separate random generator: every other
 out identical, value by value, and the prior authorization timeliness figures below did not
 change.
 
+The Provider Access API added a legacy table of opt-outs (`mbr_cnsnt`), generated from its own
+random generator: the other seven legacy tables came out identical to the previous generator's,
+value by value (compared by a hash of each table), so no earlier figure changed.
+
 The move to DuckLake changed no figure on this page apart from load times: a full build on it
 reproduced the view parity, terminology, identity, deduplication and timeliness figures. The
 Splink scores changed in their last digits, because their input is now sorted (see
@@ -69,6 +73,9 @@ Reproducibility); every link, merge and review decision stayed the same.
 | Da Vinci PDex prior authorization conformance | `make fhir-validate-pdex`          | FHIR API    |
 | FHIR server against gold (searches, Bulk export) | `make fhir-api-check` (`data/fhir_api.json`) | FHIR API |
 | Incremental CDC current state against a full rebuild and Postgres | `make cdc-check`, `data/cdc_reconcile.json` | DuckLake |
+| Provider Access data conformance (CARIN Basis, PDex Group and Consent) | `make fhir-validate-provider` | Provider Access |
+| Provider Access and Payer-to-Payer APIs against gold | `make fhir-provider-api-check` (`data/fhir_provider_api.json`) | Provider Access |
+| Payer-to-Payer messages conformance (PDex) | `make fhir-validate-p2p`              | Provider Access |
 
 ## Data quality
 
@@ -427,6 +434,98 @@ Patient), and all passed again after publishing. A first run had not caught the 
 in the counts, because HAPI reuses the result of an identical search for a minute; the checks now
 send `Cache-Control: no-cache`.
 
+**Provider Access and Payer-to-Payer APIs** (`make fhir-up fhir-publish fhir-provider-api-check`,
+run on 2026-11-11, from a clean environment, in the order CI runs it).
+
+Attribution (`gold.provider_attribution`, reference date 2026-09-28): 16,539 provider-member
+relationships, from in-network claims and prior authorization requests in the 24 months before
+the reference date, for 3,911 members covered on that date, across all 300 providers. 89 of those
+members had opted out (372 relationships), so the 300 attribution lists
+(`gold.fhir_provider_group`) hold 31 to 76 members each, median 54, and count the opted-out ones
+apart. The legacy source records 132 opt-outs, 17 of which ended when the member opted back in;
+all 132 are exported as Consent resources, with the period each was in force. The 29,224 claims
+are also exported without financial data (`gold.fhir_explanation_of_benefit_basis`).
+
+Validation (`make fhir-validate-provider`, CARIN Blue Button 2.1.0 and Da Vinci PDex 2.1.0
+together, references resolved, codes checked by tx.fhir.org):
+
+| Sample                                   | Validated | With errors | Warnings | Codes not verifiable | Known warnings |
+|------------------------------------------|----------:|------------:|---------:|---------------------:|---------------:|
+| Basis claim, professional                |        20 |           0 |        0 |                    0 |             20 |
+| Basis claim, inpatient                   |        20 |           0 |        0 |                   46 |             20 |
+| Basis claim, outpatient                  |        20 |           0 |        0 |                   49 |             20 |
+| Basis claim, pharmacy                    |        20 |           0 |        0 |                   20 |             66 |
+| Basis claim, PBM                         |        20 |           0 |        0 |                   20 |             40 |
+| Attribution list (Provider Group)        |        20 |           0 |        0 |                    0 |          1,097 |
+| Opt-out in force (Provider Access Consent) |      20 |           0 |        0 |                    0 |             20 |
+| Opt-out ended                            |        17 |           0 |        0 |                    0 |             17 |
+
+The known warnings are the CARIN identifier types and tx.fhir.org's NDC, as above, and three
+that come from the guides: PDex fixes the Consent actor role and the Provider Group characteristic
+to codes the value sets of the base resource and of ATR do not have (37 and 20), and every Coverage
+an attribution list references satisfies both profiles the ATR coverage reference allows (US Core
+7.0.0 and ATR), which the validator notes as ambiguous (1,077, one per member).
+
+Loading the Provider Access server (`fhir-server-provider`), an empty one each time:
+
+| Resources                                       |  Count | Load time |
+|-------------------------------------------------|-------:|----------:|
+| Search parameters (CARIN and PDex)              |      5 |     0.8 s |
+| Organization                                    |    326 |     1.4 s |
+| Patient                                         |  5,000 |     8.0 s |
+| Coverage                                        |  5,000 |     5.4 s |
+| ExplanationOfBenefit, claims without financial data | 29,224 | 71.9 s |
+| ExplanationOfBenefit, prior authorizations      |  3,000 |     8.5 s |
+| Consent (opt-outs)                              |    132 |     0.4 s |
+| Group (attribution lists)                       |    300 |     5.5 s |
+
+Then 129 checks through the gateway, every expected value computed from gold, all passed:
+
+| Checks                                                                 | Passed |
+|------------------------------------------------------------------------|-------:|
+| Server: FHIR 4.0.1, the PDex provider-access CapabilityStatement declared |  2 / 2 |
+| Counts: each type, claims and prior authorizations, attribution lists  |  7 / 7 |
+| Claims equal to their Basis resource (no financial data)               | 20 / 20 |
+| `Group?identifier` by provider NPI                                     | 20 / 20 |
+| Attribution list members equal to gold, without the opted-out          |  3 / 3 |
+| `$davinci-data-export`, provider-snapshot, three lists: IDs and resources of each type equal to gold, no amount on a claim | 27 / 27 |
+| `patient` parameter: only the members named, a non-member reported     | 10 / 10 |
+| An opt-out added after the list was built: the member and their data left out, reported | 3 / 3 |
+| provider-download records the transmission on that member only         |  2 / 2 |
+| provider-delta leaves out what was already sent                        |  9 / 9 |
+| Refusals: payertopayer on an attribution list, provider-snapshot on a match group, GET, no `Prefer`, HAPI's own `$export` (Group and system) | 6 / 6 |
+| `$bulk-member-match`: each MemberBundle in its group, the match group stored and found by the requesting payer | 7 / 7 |
+| `$davinci-data-export`, payertopayer: the matched members' data within the lookback | 9 / 9 |
+| `$member-match`: a match (200 and the member), no match (422), an unusable consent (422) | 4 / 4 |
+
+The `$bulk-member-match` request has 22 members, built from gold. Matched (14): 8 former members
+with their member ID, 3 with a changed family name, 3 with a member ID this payer does not know
+and demographics no other member shares. Not matched (5): a wrong birth date, a coverage with
+another payer, two strangers, and demographics two members share. Consent-constrained (3): a
+consent for non-sensitive data only, an expired one, and one naming another payer as the source.
+The Payer-to-Payer export of the 14 matched members kept 3 of their 10 prior authorizations (the
+others were decided more than 12 months before the request) and every claim (all fall within the
+5-year lookback, which starts on 2021-11-11; the claims start in 2024).
+
+To check that the checks can fail, the full claim (with its amounts) of a member of one exported
+list was put back on the Provider Access server and one opt-out deleted: 5 checks failed (the
+Consent count, and that claim in the snapshot and the delta, both as different from gold and as
+carrying an amount), and all 129 passed again after publishing.
+
+Each export takes about 20 seconds (18.1 to 20.1 s), whatever its size: HAPI runs Bulk exports as
+batch jobs, which its scheduler picks up at intervals. A first run of the check found that the
+gateway renumbered the members of each result group, so a requester could not tell which of its
+MemberBundles landed where; each contained Patient now keeps the ID the requester gave it.
+
+Validation of the messages (`make fhir-validate-p2p`, PDex 2.1.0, tx.fhir.org): the request and the
+gateway's response, 0 errors and 0 warnings. 22 errors in the request are counted apart as a known
+IG error, one per consent: HRex 1.1.0 binds `Consent.policy.uri` to two codes that are anchors on
+an HTML page (`StructureDefinition-hrex-consent.html#regular`, `#sensitive`), which the validator
+cannot resolve, and the PDex example request fails with the same error. The first validation of
+the request found three faults in the check itself: the coverages lacked `relationship`, three
+coverages to match had no member ID (HRex requires one, so those cases now carry one this payer
+does not know), and the resources had no narrative.
+
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
 removed from the exported copies; the CARIN package is loaded only for its code systems): 0
 errors and 0 warnings for Patient, Coverage and ExplanationOfBenefit, with 519 known warnings (the
@@ -619,17 +718,19 @@ columns that exist in the database), on DuckLake, with the incremental current s
 
 | Layer  | Models | Models documented | Models with tests | Columns | Columns documented | Columns with tests |
 |--------|-------:|------------------:|------------------:|--------:|-------------------:|-------------------:|
-| Silver |     21 |              100% |              100% |     235 |               100% |              28.5% |
-| Gold   |     37 |              100% |              100% |     310 |               100% |              22.9% |
+| Silver |     23 |              100% |              100% |     254 |               100% |              29.1% |
+| Gold   |     41 |              100% |              100% |     331 |               100% |              25.1% |
 
 Every model and column has a description, and every model has at least one test. Most columns
 have no test of their own: tests cover keys, relationships, accepted values, parity and the quality
 checks, not descriptive attributes such as names or amounts. The seven incremental current state
 models added 114 silver columns, the raw legacy columns and the CDC metadata; their tests cover
-the key, `_op` and `_lsn`, so silver column test coverage fell from 37.2% to 28.5%. `dbt build`
-ran 292 nodes, none
-failed, and the rest passed except the expected warnings: 5 for the legacy issues above, plus 1
-for the replication slot when the drill has run before, as in CI.
+the key, `_op` and `_lsn`, so silver column test coverage fell from 37.2% to 28.5%. The Provider
+Access and Payer-to-Payer models (the opt-outs in silver; the attribution, the attribution lists,
+the opt-outs as FHIR and the claims without financial data in gold) moved it to 29.1% in silver
+and 25.1% in gold. `dbt build` ran 327 nodes, none failed, and the rest passed except the expected
+warnings: 5 for the legacy issues above, plus 1 for the replication slot when the drill has run
+before, as in CI.
 On DuckLake, both refresh DAGs ran in the Airflow container (2026-11-10, `airflow dags test`):
 `lakehouse_full_refresh` (CDC sync, the three loads, the ViewDefinition check, `dbt build` with 292
 nodes and no error, coverage) and `legacy_cdc_refresh` both succeeded, and the reconciliation run
