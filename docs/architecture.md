@@ -331,6 +331,18 @@ gold (dbt) ── publish ─► fhir-gateway (:8092) ─► fhir-server-provide
   last 12 months. HAPI's own `$export` is refused through the gateway, since it would skip the
   opt-outs; every other request is passed through, with the server's URLs rewritten to the
   gateway's.
+- **Export jobs and their expiry.** The completed status of an export announces in `Expires` how
+  long its files stay available: an hour after the job ended, fixed then (it used to be an hour
+  after each poll, so it never came, and nothing enforced it). After it the status and the files
+  answer 404, and a sweeper removes expired jobs and their files. Once the gateway has read what
+  HAPI exported, it deletes HAPI's copy (the Binary files, which HAPI otherwise keeps in its
+  database, and the job), so the only copy of an export is the gateway's, which expires. Jobs
+  live in memory, and the gateway removes their directory when it starts, so a restart leaves no
+  file behind. A client may have two exports running at a time; a third is refused with 429 and
+  `Retry-After`, as Bulk Data allows. The checks cannot wait an hour, so a second instance of the
+  gateway (`fhir-gateway-expiry`, port 8095, in front of the same server, accepting the same
+  tokens) keeps exports 20 seconds and allows one running export per client; it runs no prior
+  authorization service, so notifications are not sent twice.
 - **Member match.** `$bulk-member-match` takes one MemberBundle per member (HRex demographics, the
   coverage the new payer says the member had here, the member's consent) and answers with three
   PDex Groups: matched, not matched and consent-constrained. The match uses the member ID on the
@@ -382,8 +394,11 @@ gold (dbt) ── publish ─► fhir-gateway (:8092) ─► fhir-server-provide
   for every rule above; the Payer-to-Payer export of the resulting match group; the consent
   period on the group, a consent that ends between the match and the export (the gateway judges
   the period against today, so the check ends it by editing the stored period as the
-  administration client), and a revocation after an export finished and during one; and
-  `$member-match`. It resets the attribution lists it exports from gold first, so it can run
+  administration client), and a revocation after an export finished and during one;
+  `$member-match`; and, through the 20-second instance, the expiry: a second running export
+  refused, `Expires` fixed when the job ended, the files served until then and 404 after, the
+  job's directory removed by the sweeper, a restart that leaves no file, and no Binary left on
+  the server. It resets the attribution lists it exports from gold first, so it can run
   again.
 - **What is not done.** There is no
   clinical (US Core) data to share, since the legacy source has only claims, and no drug prior
