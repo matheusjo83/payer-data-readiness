@@ -13,7 +13,9 @@ providers come from gold, so it runs after dbt).
   provider-<provider id>     one backend client per provider with an attribution
                              list (Provider Access), acting for Organization/<id>:
                              read and search of Patient, Coverage,
-                             ExplanationOfBenefit, Group and Organization.
+                             ExplanationOfBenefit, Group and Organization; and prior
+                             authorization (DTR questionnaires, PAS $submit and
+                             $inquire, PAS subscriptions).
   payer-new-payer,           backend clients of other payers (Payer-to-Payer), each
   payer-other-payer          with its payer identifier: member match (system/Group.c,
                              system/Patient.s) and the export of its match groups.
@@ -47,7 +49,10 @@ PATIENT_SCOPES = ["openid", "fhirUser", "launch/patient", "offline_access", "onl
                   "patient/Patient.rs", "patient/Coverage.rs", "patient/ExplanationOfBenefit.rs",
                   "patient/Organization.rs"]
 PROVIDER_SCOPES = ["system/Patient.rs", "system/Coverage.rs", "system/ExplanationOfBenefit.rs", "system/Group.rs",
-                   "system/Organization.rs"]
+                   "system/Organization.rs",
+                   # Prior authorization: DTR $questionnaire-package, PAS $submit (c) and $inquire (r),
+                   # PAS subscriptions.
+                   "system/Questionnaire.r", "system/Claim.cr", "system/Subscription.crd"]
 PAYER_SCOPES = ["system/Group.crs", "system/Patient.rs", "system/Coverage.r", "system/ExplanationOfBenefit.r",
                 "system/Organization.r"]
 ADMIN_SCOPES = ["system/*.cruds"]

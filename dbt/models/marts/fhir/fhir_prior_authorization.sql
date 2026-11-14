@@ -13,6 +13,9 @@
 --   urgency     priority: stat for an expedited request, normal otherwise
 --               (process-priority, an HL7 code system).
 --   outcome     queued while pending, complete once decided.
+--   service     the primary diagnosis (ICD-10-CM), and on the item the service
+--               start date, the place of service (CMS) and the quantity requested,
+--               the fields a Da Vinci PAS request carries.
 --
 -- The profile is declared without a version: its meta.profile slice requires
 -- the canonical URL as is. Only requests with a known member, a coverage span
@@ -74,11 +77,22 @@ select
         'insurance', json_array(json_object(
             'focal', true,
             'coverage', json_object('reference', 'Coverage/cov-' || eligibility_id))),
+        'diagnosis', json_array(json_object(
+            'sequence', 1,
+            'diagnosisCodeableConcept', json_object('coding', json_array(json_object(
+                'system', 'http://hl7.org/fhir/sid/icd-10-cm',
+                'code', diagnosis_code))))),
         'item', json_array(json_object(
             'sequence', 1,
+            'diagnosisSequence', json_array(1),
             'productOrService', json_object('coding', json_array(json_object(
                 'system', 'http://www.ama-assn.org/go/cpt',
                 'code', service_code))),
+            'servicedDate', strftime(service_date, '%Y-%m-%d'),
+            'locationCodeableConcept', json_object('coding', json_array(json_object(
+                'system', 'https://www.cms.gov/Medicare/Coding/place-of-service-codes/Place_of_Service_Code_Set',
+                'code', place_of_service_code))),
+            'quantity', json_object('value', service_quantity),
             'adjudication', json_array(json_merge_patch('{}', json_object(
                 'extension', list_concat(
                     [json_object(

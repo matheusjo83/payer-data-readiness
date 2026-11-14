@@ -1,7 +1,7 @@
 -- Source-to-lakehouse latency of CDC changes: time between the commit in the
 -- legacy database (_commit_ts) and the arrival of the change in bronze
 -- (_loaded_at). Snapshot rows (_op = 'S') have no commit time and are excluded.
-{% set tables = ['pln', 'mbr_mstr', 'elig_span', 'prv', 'clm_hdr', 'clm_ln', 'pa_req', 'mbr_cnsnt'] %}
+{% set tables = ['pln', 'mbr_mstr', 'elig_span', 'prv', 'clm_hdr', 'clm_ln', 'pa_req', 'pa_doc', 'mbr_cnsnt'] %}
 
 with changes as (
     {% for t in tables %}

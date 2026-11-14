@@ -51,7 +51,7 @@ PG_DSN = os.environ.get(
     "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy"
 )
 SLOT = "lakehouse_cdc"
-TABLES = ["pln", "mbr_mstr", "elig_span", "prv", "clm_hdr", "clm_ln", "pa_req", "mbr_cnsnt"]
+TABLES = ["pln", "mbr_mstr", "elig_span", "prv", "clm_hdr", "clm_ln", "pa_req", "pa_doc", "mbr_cnsnt"]
 BATCH_FILE = Path("data/cdc_batch.ndjson")
 MAX_CHANGES_PER_BATCH = 200_000
 # slot-status fails above this much retained WAL: half the cap set in

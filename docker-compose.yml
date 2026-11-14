@@ -132,14 +132,19 @@ services:
     build: ./fhir/gateway
     image: payer-fhir-python:local
     container_name: payer-fhir-gateway
-    depends_on: [fhir-server-provider, fhir-auth]
+    depends_on: [fhir-server-provider, fhir-auth, legacy-db]
     environment:
       GATEWAY_API: provider-access
       UPSTREAM_FHIR_URL: http://fhir-server-provider:8080/fhir
       PUBLIC_BASE_URL: http://localhost:8092/fhir
       AUTH_INTERNAL_URL: http://fhir-auth:8080
       AUTH_PUBLIC_URL: http://localhost:8093
+      # Prior authorization (Da Vinci PAS) writes requests to the payer's UM system.
+      LEGACY_PG_DSN: host=legacy-db port=5432 dbname=payer_legacy user=legacy password=legacy
       PYTHONUNBUFFERED: "1"
+    # Subscription notifications go to the providers' endpoints; the checks listen on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./fhir/gateway:/opt/gateway:ro
     command: ["python", "-I", "/opt/gateway/gateway.py", "--port", "8080"]

@@ -6,7 +6,7 @@
 -- table and the number of rows found on only one side.
 {% set tables = {
     'pln': ['pln_id'], 'mbr_mstr': ['mbr_sk'], 'elig_span': ['elig_sk'], 'prv': ['prv_id'],
-    'clm_hdr': ['clm_id'], 'clm_ln': ['clm_id', 'ln_nbr'], 'pa_req': ['pa_id'],
+    'clm_hdr': ['clm_id'], 'clm_ln': ['clm_id', 'ln_nbr'], 'pa_req': ['pa_id'], 'pa_doc': ['pa_id', 'item_id'],
     'mbr_cnsnt': ['cnsnt_id'],
 } %}
 select * from (

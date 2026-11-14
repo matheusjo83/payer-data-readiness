@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-prior-auth fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check fhir-prior-auth-check pa-review docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
 	docker compose up -d --build --wait legacy-db lakehouse-catalog
@@ -89,8 +89,11 @@ fhir-validate-provider: ## Validate the Provider Access / Payer-to-Payer data: c
 fhir-validate-p2p: ## Validate the Payer-to-Payer $$bulk-member-match request and response saved by fhir-provider-api-check (PDex 2.1.0, Java)
 	$(PY) fhir/validate.py --ig payer-to-payer --top 60 --tx https://tx.fhir.org
 
-fhir-validate-all: ## The four validations above in one HL7 validator run (loading the packages takes most of a run), one summary per mode; after fhir-provider-api-check (Java)
-	$(PY) fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer --top 60 --tx https://tx.fhir.org
+fhir-validate-prior-auth: ## Validate the prior authorization exchange saved by fhir-prior-auth-check (Da Vinci CRD, DTR, PAS 2.1.0, Java)
+	$(PY) fhir/validate.py --ig prior-auth --top 60 --tx https://tx.fhir.org
+
+fhir-validate-all: ## The five validations above in one HL7 validator run (loading the packages takes most of a run), one summary per mode; after fhir-provider-api-check and fhir-prior-auth-check (Java)
+	$(PY) fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer prior-auth --top 60 --tx https://tx.fhir.org
 
 fhir-up:   ## Start the HAPI FHIR servers empty (recreated each time), the SMART authorization server (http://localhost:8093) and the gateways: Patient Access at http://localhost:8090/fhir, Provider Access and Payer-to-Payer at http://localhost:8092/fhir
 	mkdir -p data/fhir_auth
@@ -107,6 +110,12 @@ fhir-api-check: ## Check the FHIR server against gold: counts, CARIN/PDex search
 
 fhir-security-check: ## Check the SMART authorization of both APIs: discovery, tokens, a member's compartment, attribution and opt-outs, other payers (writes data/fhir_security.json)
 	$(PY) fhir/security_check.py
+
+fhir-prior-auth-check: ## Check prior authorization end to end (Da Vinci CRD, DTR, PAS): the provider's order to the payer's decision, the UM tables, gold and the member's app (writes data/fhir_prior_auth.json)
+	$(PY) fhir/prior_auth_check.py
+
+pa-review: ## Simulated reviewer: decide the prior authorization requests Da Vinci PAS pended (writes pa_req)
+	$(PY) fhir/prior_auth_review.py
 
 fhir-provider-api-check: ## Check the Provider Access and Payer-to-Payer APIs (gateway) against gold: attribution, $$davinci-data-export, opt-outs, $$bulk-member-match (writes data/fhir_provider_api.json)
 	$(PY) fhir/provider_api_check.py

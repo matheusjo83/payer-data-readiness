@@ -685,6 +685,39 @@ two consent policy codes are links to anchors on a web page, which the validator
 and the guide's own example fails with the same error. It is counted apart, with the reason, like
 the three warnings that come from conflicts between PDex and the guides it builds on.
 
+## Prior authorization, from the order to the decision
+
+Until here the prior authorizations were the payer's records, published for the member; how a
+provider asks for one was outside the project. CMS-0057-F also requires a Prior Authorization
+API, and Da Vinci splits the exchange into three guides: CRD tells the provider, while the order is
+being written, whether the payer needs an authorization and what documentation; DTR hands over
+the questionnaire; PAS carries the request and the decision. I chose the payer's side of all
+three, in version 2.1.0, the one CMS lists, with a script playing the provider's EHR. The requests
+are written to the legacy source, as a utilization management system would hold them, so that the
+pipeline that already exists carries each one to the lakehouse and to the member's app. Decisions
+come from fixed rules: a request whose documentation meets the criteria is approved on arrival,
+any other is pended with the reason, and a simulated reviewer decides it later. The provider
+learns of that decision through a PAS Subscription, or by asking with `$inquire`.
+
+A prototype of one full cycle, built by hand from a real request in gold and validated before any
+code was written, found what the data lacked. DTR requires the clinician who answered to be named
+as a US Core Practitioner, and CRD's patient carries the provider's medical record number; the
+project has neither, and both are the provider's data, so I kept them in the simulated EHR. PAS
+requires a place of service, a diagnosis and a service date on each request, which `pa_req` did not
+have; I chose to add them, with the channel the request came through and a table for the
+questionnaire answers, and to give the 3,000 generated requests their values from a separate
+random generator, so that no published figure changed. Two services need an authorization,
+physical therapy and a chest X-ray, each with its questionnaire.
+
+The check states its own expected decisions for nine requests from two providers and follows
+them through every step: the coverage requirements, the questionnaire, the decision on arrival,
+the rows written to the legacy source, the reviewer's decisions and the notifications (to the
+provider that subscribed, and only for its requests), the inquiry, and at the end CDC, dbt, the
+PDex resource in gold and the member reading their own decision. All 91 checks pass, and with
+three faults put into the service, 15 of them failed. Validating the service's real answers found
+one defect in CRD itself: an invariant that fails whenever an optional element is present, so the
+service leaves the element out.
+
 ## What this does not show, and what would change for production
 
 - **Terminology.** CPT and NUBC revenue codes are licensed, so nothing here checks them, and the
@@ -705,8 +738,10 @@ the three warnings that come from conflicts between PDex and the guides it build
   absent. The servers
   run on HAPI's embedded H2 database and are rebuilt on every publish, so their `lastUpdated` is
   the publish time; a production server would sit on a real database and receive only what
-  changed. Prior authorizations are published, not requested: the provider-facing Prior
-  Authorization API (Da Vinci PAS) is outside this project.
+  changed. The prior authorization exchange (Da Vinci CRD, DTR and PAS) is the payer's side only,
+  against a simulated EHR: FHIR without the X12 278, one service per request, no updates or
+  cancellations, rules and a reviewer that demonstrate the flow rather than a medical policy, and
+  subscriptions kept in memory.
 - **Scale and concurrency.** DuckLake takes several writers and the current state is incremental,
   but everything still runs on one machine, the gold models are rebuilt in full on every build,
   and the tables are readable only through DuckDB. A deployment that other engines must read
