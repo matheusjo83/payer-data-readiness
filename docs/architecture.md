@@ -343,6 +343,18 @@ gold (dbt) ── publish ─► fhir-gateway (:8092) ─► fhir-server-provide
   complied with. The match group is stored on the server, identified by the requesting payer, and
   that payer exports it with `exportType=payertopayer`. `Patient/$member-match` (HRex) does the
   same for one member, with a 422 when there is no unique match or the consent cannot be honored.
+- **Consent at export.** PDex: "The Data Export operation SHALL check the consent status for each
+  member at the time of execution". The match group keeps each matched member's consent period on
+  its `member.period` (PDex does not say where; `characteristic.period.start` stays the date of
+  the match, as the profile says), and `$davinci-data-export` leaves out a member whose period does
+  not cover the day it runs, with an OperationOutcome, as it does for the Provider Access
+  opt-outs. A consent that ends after the match therefore applies to the next export.
+- **Revocation.** PDex leaves revocation to the new payer ("the New Payer manages the Consent
+  Revocation process"), which revokes by deleting its match group (`DELETE Group/[id]`, scope `d`
+  on Group, its own groups only). A new export of the group is then refused (404), and its exports,
+  finished or still running, answer 410: a running one stops before writing anything, a finished
+  one's files are no longer served. A member who tells this payer directly to stop sharing, which
+  PDex also allows, is not modelled; nor is revoking one member of a group.
 - **Validation.** `make fhir-validate-provider` validates a sample of each Basis profile, the
   attribution lists and the opt-outs (in force and ended), with their references in the Bundle and
   codes checked by tx.fhir.org, against CARIN 2.1.0 and PDex 2.1.0 together. `make
@@ -367,11 +379,13 @@ gold (dbt) ── publish ─► fhir-gateway (:8092) ─► fhir-server-provide
   resources must be exactly the members' data and equal gold apart from `meta`; the `patient`
   parameter; an opt-out put on the server after the list was built; a download followed by a
   delta; the requests it must refuse; a `$bulk-member-match` request built from gold, with a case
-  for every rule above; the Payer-to-Payer export of the resulting match group; and
+  for every rule above; the Payer-to-Payer export of the resulting match group; the consent
+  period on the group, a consent that ends between the match and the export (the gateway judges
+  the period against today, so the check ends it by editing the stored period as the
+  administration client), and a revocation after an export finished and during one; and
   `$member-match`. It resets the attribution lists it exports from gold first, so it can run
   again.
-- **What is not done.** The Payer-to-Payer consent is checked when the match is made, not again at
-  export. There is no
+- **What is not done.** There is no
   clinical (US Core) data to share, since the legacy source has only claims, and no drug prior
   authorizations, which both APIs exclude. `$bulk-member-match` answers synchronously.
 
@@ -414,7 +428,8 @@ already implements the PDex operations.
   opt-out. An opt-out recorded after the list was built applies to the next search.
 - **Another payer** calls `$bulk-member-match` and `$member-match`, where a consent counts only if
   it names the calling payer as the recipient (otherwise the member is consent-constrained), and
-  reads, searches by its identifier and exports its own match groups. An export job, its status and
+  reads, searches by its identifier, exports and deletes (a revocation) its own match groups. An
+  export job, its status and
   its files are visible only to the client that started it.
 - **Scopes.** Each interaction needs its permission on its type (`r` read, `s` search, `c u d`
   writes); an export needs `r` on Group and on each type exported, `$bulk-member-match` `c` on

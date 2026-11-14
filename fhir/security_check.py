@@ -29,7 +29,7 @@ allowed request returns with gold:
                    now applies to the next search; another client cannot read
                    its export job;
   other payer      a match group of another payer refused (read, search,
-                   export); a consent naming another payer as the recipient
+                   export, deletion); a consent naming another payer as the recipient
                    does not count; plain searches refused.
 
 Writes data/fhir_security.json and exits with status 1 if any check fails.
@@ -371,6 +371,7 @@ def check_other_payer(checks: Checks, gold: Gold, member: str) -> None:
         ("a search for another payer's match groups", "GET", f"{PROVIDER}/Group?identifier={new_payer}", None, None),
         ("export of another payer's match group", "POST", f"{PROVIDER}/Group/{gid}/$davinci-data-export",
          {"resourceType": "Parameters", "parameter": []}, {"Prefer": "respond-async"}),
+        ("deletion of another payer's match group", "DELETE", f"{PROVIDER}/Group/{gid}", None, None),
         ("a plain Patient search", "GET", f"{PROVIDER}/Patient?_id={member}", None, None),
         ("a provider's attribution list", "GET", f"{PROVIDER}/Group?code=pdexprovidergroup", None, None),
     ]:

@@ -31,6 +31,15 @@ computed from the gold models, independently of the server:
   export           $davinci-data-export of the match group (payertopayer):
   (payer-to-payer) the matched members' data, claims within 5 years and prior
                    authorizations pending or decided in the last 12 months;
+  consent at       each matched member's consent period kept on the match group
+  export           (member.period); a consent that ended between the match and
+                   the export leaves the member out, reported in an
+                   OperationOutcome (the gateway checks the period against
+                   today, so the check ends it by editing the stored period, as
+                   the administration client); the new payer revoking the
+                   consent by deleting its match group: the files of a finished
+                   export and the status of a running one answer 410, and a new
+                   export is refused;
   $member-match    one member: a match, no match (422) and an unusable consent
                    (422).
 
@@ -71,7 +80,7 @@ REPORT = Path("data/fhir_provider_api.json")
 MESSAGES = Path("data/fhir_provider_api/messages")
 DEFAULT_BASE = os.environ.get("FHIR_GATEWAY_URL", "http://localhost:8092/fhir")
 PROVIDER_SCOPE = "system/Patient.rs system/Coverage.rs system/ExplanationOfBenefit.rs system/Group.rs system/Organization.rs"
-PAYER_SCOPE = "system/Group.crs system/Patient.rs system/Coverage.r system/ExplanationOfBenefit.r system/Organization.r"
+PAYER_SCOPE = "system/Group.crds system/Patient.rs system/Coverage.r system/ExplanationOfBenefit.r system/Organization.r"
 ADMIN = BackendClient("admin-provider-access", "system/*.cruds")
 NEW_PAYER = BackendClient("payer-new-payer", PAYER_SCOPE)
 _providers: dict[str, BackendClient] = {}
@@ -466,6 +475,83 @@ def build_request(gold: Gold) -> tuple[dict, dict]:
     return request, expected
 
 
+def kick_off(base: str, group_id: str, client: BackendClient, **values) -> tuple[int, str | None]:
+    status, headers, _ = call("POST", f"{base}/Group/{group_id}/$davinci-data-export", parameters(**values),
+                              {"Prefer": "respond-async"}, client)
+    return status, headers.get("Content-Location")
+
+
+def wait(poll: str, client: BackendClient) -> tuple[int, dict]:
+    """The final status of an export job and its body (a manifest or an OperationOutcome)."""
+    started = time.time()
+    while True:
+        status, _, body = call("GET", poll, headers={"Accept": "application/json"}, client=client)
+        if status != 202 or time.time() - started > 900:
+            return status, body
+        time.sleep(2)
+
+
+def match_group_of(base: str, bundles: list[dict]) -> dict:
+    status, _, response = call("POST", f"{base}/Group/$bulk-member-match",
+                               {"resourceType": "Parameters", "parameter": bundles}, client=NEW_PAYER)
+    if status != 200:
+        raise SystemExit(f"$bulk-member-match failed: HTTP {status} {response}")
+    return next(p["resource"] for p in response["parameter"] if p["name"] == "MatchedMembers")
+
+
+def check_consent_at_export(base: str, checks: Checks, request: dict, expected: dict, match_group: dict) -> None:
+    """The consent kept on the match group and checked again when the export runs, and its
+    revocation by the new payer (PDex: "The Data Export operation SHALL check the consent
+    status for each member at the time of execution")."""
+    group = "consent at export"
+    by_n = {int(b["part"][0]["resource"]["id"]): b for b in request["parameter"]}
+    matched = [n for n, (k, _) in sorted(expected.items()) if k == "match"]
+    want = {f"Patient/{expected[n][1]}": next(p["resource"] for p in by_n[n]["part"]
+                                               if p["name"] == "Consent")["provision"]["period"] for n in matched}
+    checks.add(group, "member.period: each matched member's consent period", want,
+               {m["entity"]["reference"]: m.get("period") for m in match_group.get("member", [])})
+
+    # A consent that ends between the match and the export: the new match group's
+    # first member's period ends yesterday (edited on the server, as time passing would).
+    g2 = match_group_of(base, [by_n[n] for n in matched[:3]])
+    refs = [m["entity"]["reference"] for m in g2["member"]]
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    stored = call("GET", f"{base}/Group/{g2['id']}", client=ADMIN)[2]
+    stored["member"][0]["period"]["end"] = yesterday
+    status, _, _ = call("PUT", f"{base}/Group/{g2['id']}", stored, client=ADMIN)
+    checks.add(group, "consent ended yesterday (stored period edited)", 200, status)
+    status, poll = kick_off(base, g2["id"], NEW_PAYER, exportType=P2P, _type="Patient")
+    status, manifest = wait(poll, NEW_PAYER) if status == 202 else (status, {})
+    checks.add(group, "export after the consent ended: HTTP", 200, status)
+    got = {f"Patient/{r['id']}" for o in manifest.get("output", []) for r in ndjson(o["url"], NEW_PAYER)}
+    checks.add(group, "export: only the members whose consent is in force", sorted(refs[1:]), sorted(got))
+    notes = [i["diagnostics"] for e in manifest.get("error", []) for o in ndjson(e["url"], NEW_PAYER)
+             for i in o["issue"]]
+    checks.add(group, "export: the member left out is reported", True,
+               any(d.startswith(refs[0] + ":") and f"ended {yesterday}" in d for d in notes))
+
+    # Revocation after the export finished: the new payer deletes its match group.
+    files = [o["url"] for o in manifest.get("output", []) + manifest.get("error", [])]
+    status, _, _ = call("DELETE", f"{base}/Group/{g2['id']}", client=NEW_PAYER)
+    checks.add(group, "revocation: the new payer deletes its match group", 200, status)
+    checks.add(group, "revocation: the finished export's files -> 410", [410] * len(files),
+               [call("GET", url, headers={"Accept": "application/fhir+ndjson"}, client=NEW_PAYER)[0]
+                for url in files])
+    checks.add(group, "revocation: the finished export's status -> 410", 410, wait(poll, NEW_PAYER)[0])
+    checks.add(group, "revocation: a new export of the deleted group -> 404", 404,
+               kick_off(base, g2["id"], NEW_PAYER, exportType=P2P)[0])
+
+    # Revocation while an export runs: no manifest, no files.
+    g3 = match_group_of(base, [by_n[matched[3]]])
+    status, poll = kick_off(base, g3["id"], NEW_PAYER, exportType=P2P)
+    checks.add(group, "revocation during an export: export accepted", 202, status)
+    status, _, _ = call("DELETE", f"{base}/Group/{g3['id']}", client=NEW_PAYER)
+    checks.add(group, "revocation during an export: match group deleted", 200, status)
+    status, body = wait(poll, NEW_PAYER) if poll else (None, {})
+    checks.add(group, "revocation during an export: status -> 410, no manifest", [410, "OperationOutcome"],
+               [status, body.get("resourceType") if isinstance(body, dict) else None])
+
+
 def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
     request, expected = build_request(gold)
     MESSAGES.mkdir(parents=True, exist_ok=True)
@@ -519,6 +605,7 @@ def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
     all_pas = sum(r["use"] == "preauthorization" for r in gold.member_data(members)["ExplanationOfBenefit"].values())
     kept_pas = sum(r["use"] == "preauthorization" for r in data["ExplanationOfBenefit"].values())
     compare_export(checks, "export: payertopayer", gid, data, got)
+    check_consent_at_export(base, checks, request, expected, match_group)
 
     # $member-match (HRex), one member at a time.
     by_n = {int(b["part"][0]["resource"]["id"]): b for b in request["parameter"]}

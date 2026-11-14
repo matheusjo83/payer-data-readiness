@@ -18,7 +18,9 @@ providers come from gold, so it runs after dbt).
                              $inquire, PAS subscriptions).
   payer-new-payer,           backend clients of other payers (Payer-to-Payer), each
   payer-other-payer          with its payer identifier: member match (system/Group.c,
-                             system/Patient.s) and the export of its match groups.
+                             system/Patient.s), the export of its match groups, and
+                             their deletion when a member's consent is revoked
+                             (system/Group.d).
   admin-patient-access,      the payer's own administration client of each API
   admin-provider-access      (system/*.cruds): publishing (make fhir-publish) and the
                              checks' counts and fault injection.
@@ -53,7 +55,7 @@ PROVIDER_SCOPES = ["system/Patient.rs", "system/Coverage.rs", "system/Explanatio
                    # Prior authorization: DTR $questionnaire-package, PAS $submit (c) and $inquire (r),
                    # PAS subscriptions.
                    "system/Questionnaire.r", "system/Claim.cr", "system/Subscription.crd"]
-PAYER_SCOPES = ["system/Group.crs", "system/Patient.rs", "system/Coverage.r", "system/ExplanationOfBenefit.r",
+PAYER_SCOPES = ["system/Group.crds", "system/Patient.rs", "system/Coverage.r", "system/ExplanationOfBenefit.r",
                 "system/Organization.r"]
 ADMIN_SCOPES = ["system/*.cruds"]
 
