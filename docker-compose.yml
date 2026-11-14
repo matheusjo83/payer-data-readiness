@@ -151,6 +151,33 @@ services:
     ports:
       - "8092:8080"
 
+  # A second instance of the Provider Access gateway, in front of the same server,
+  # that keeps a finished export 20 seconds instead of an hour and lets a client run
+  # one at a time: make fhir-provider-api-check sees exports expire through it. It
+  # accepts the Provider Access tokens, and runs no prior authorization service.
+  fhir-gateway-expiry:
+    profiles: [api]
+    build: ./fhir/gateway
+    image: payer-fhir-python:local
+    container_name: payer-fhir-gateway-expiry
+    depends_on: [fhir-server-provider, fhir-auth]
+    environment:
+      GATEWAY_API: provider-access
+      UPSTREAM_FHIR_URL: http://fhir-server-provider:8080/fhir
+      PUBLIC_BASE_URL: http://localhost:8095/fhir
+      TOKEN_AUDIENCE: http://localhost:8092/fhir
+      AUTH_INTERNAL_URL: http://fhir-auth:8080
+      AUTH_PUBLIC_URL: http://localhost:8093
+      EXPORT_RETENTION_SECONDS: "20"
+      EXPORT_MAX_RUNNING: "1"
+      PRIOR_AUTH: "off"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./fhir/gateway:/opt/gateway:ro
+    command: ["python", "-I", "/opt/gateway/gateway.py", "--port", "8080"]
+    ports:
+      - "8095:8080"
+
   # Orchestration (optional): docker compose --profile airflow up -d
   airflow-db:
     profiles: [airflow]

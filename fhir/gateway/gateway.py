@@ -48,6 +48,15 @@ deletion of a match group d on Group. A
 $davinci-data-export job, its status and its files belong to the client that
 started it (404 for any other).
 
+Export jobs. A client may have at most EXPORT_MAX_RUNNING exports running (2 by
+default); one more is refused with 429 and Retry-After. Once the gateway has read
+what HAPI exported it deletes HAPI's copy (the Binary files and the job), so the
+only copy is the job's own. A job ends with its expiry fixed: EXPORT_RETENTION_SECONDS
+after it ended (an hour by default), the Expires the completed status announces.
+After it the status and the files answer 404, and a sweeper removes expired jobs
+and their files. Jobs live in memory: the gateway removes their directory when it
+starts, so a restart leaves no file behind.
+
 The PDex operations (provider-access):
 
   POST [base]/Group/[id]/$davinci-data-export   (Da Vinci ATR 2.1.0, profiled by PDex)
@@ -127,10 +136,15 @@ consent-constrained.
 Python with PyJWT, cryptography and psycopg (fhir/gateway/Dockerfile), this directory
 mounted.
 
+A second instance of the same API (fhir-gateway-expiry, port 8095, for the checks)
+accepts the first one's tokens (--token-audience), keeps exports 20 seconds, and
+runs no prior authorization service (--no-prior-auth).
+
 Usage:
     python fhir/gateway/gateway.py --api provider-access [--port 8092] [--upstream http://fhir-server-provider:8080/fhir]
         [--public-base http://localhost:8092/fhir] [--auth http://localhost:8093]
-        [--auth-public http://localhost:8093]
+        [--auth-public http://localhost:8093] [--token-audience URL] [--no-prior-auth]
+    environment: EXPORT_RETENTION_SECONDS (3600), EXPORT_MAX_RUNNING (2)
 """
 
 import argparse
@@ -336,6 +350,16 @@ def export_parameters(query: dict, body: bytes) -> dict:
     return params
 
 
+def discard_upstream_export(upstream: Upstream, poll: str, manifest: dict) -> None:
+    """Delete the Binary files of a finished HAPI export, and the job itself."""
+    for output in manifest.get("output", []) + manifest.get("error", []):
+        status, _, data = upstream.request("DELETE", output["url"], headers={"Accept": "application/fhir+json"})
+        if status not in (200, 204, 404, 410):
+            print(f"Could not delete the upstream export file {output['url']}: HTTP {status} {data[:200]!r}",
+                  flush=True)
+    upstream.request("DELETE", poll)
+
+
 def revoked(group_id: str) -> FhirError:
     return FhirError(410, f"Group/{group_id} was deleted by the requesting payer (the members' consent was "
                           "revoked); its exports are no longer available", "deleted")
@@ -350,12 +374,14 @@ class ExportJob:
         self.dir = JOBS_DIR / self.id
         self.cancelled = False
         self.revoked = False
+        self.expires_at: datetime | None = None  # set when the job ends: then + RETENTION
 
     def revoke(self) -> None:
         """The match group was deleted: the job fails and its files are removed."""
         error = revoked(self.group_id)
         self.revoked = self.cancelled = True
         self.status, self.error, self.manifest = "failed", (error.status, outcome(error.message, error.code)), None
+        self.expires_at = datetime.now(timezone.utc) + RETENTION
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def single(self, name: str) -> str | None:
@@ -369,17 +395,17 @@ class ExportJob:
 
     def run(self, public_base: str) -> None:
         try:
-            manifest = self.export(public_base)
-            if self.revoked:
-                return
-            self.manifest, self.status = manifest, "completed"
+            result = ("completed", self.export(public_base), None)
         except FhirError as e:
-            if self.revoked:
-                return
-            self.status, self.error = "failed", (e.status, outcome(e.message, e.code))
+            result = ("failed", None, (e.status, outcome(e.message, e.code)))
         except Exception as e:  # noqa: BLE001 - reported to the client as a failed job
             traceback.print_exc()
-            self.status, self.error = "failed", (500, outcome(f"Export failed: {e}", "exception"))
+            result = ("failed", None, (500, outcome(f"Export failed: {e}", "exception")))
+        if self.revoked:  # revoke() has set the outcome
+            return
+        # The expiry is fixed when the job ends, before the status shows it ended.
+        self.expires_at = datetime.now(timezone.utc) + RETENTION
+        self.status, self.manifest, self.error = result
 
     def prepare(self) -> None:
         """Check the request before accepting it (raises FhirError)."""
@@ -479,6 +505,20 @@ class ExportJob:
             else:
                 threading.Event().wait(2)
 
+        # Take what HAPI exported, then delete HAPI's copies (its Binary files and
+        # the job), so the only copy left is this job's, which expires.
+        self.progress = "downloading"
+        try:
+            exported = []
+            for output in upstream_manifest.get("output", []):
+                status, _, data = self.upstream.request("GET", output["url"],
+                                                        headers={"Accept": "application/fhir+ndjson"})
+                if status != 200:
+                    raise FhirError(502, f"Upstream export file {output['url']} failed with HTTP {status}")
+                exported.append(data)
+        finally:
+            discard_upstream_export(self.upstream, poll, upstream_manifest)
+
         # Filter what HAPI exported.
         self.progress = "filtering"
         cutoff = years_before(started.date(), LOOKBACK_YEARS)
@@ -489,8 +529,7 @@ class ExportJob:
                 ext = extension(m, LAST_TRANSMISSION_EXT)
                 last_sent[ref] = parse_instant(ext.get("valueDateTime")) if ext else None
         kept, organizations, counts = {}, {}, {}
-        for output in upstream_manifest.get("output", []):
-            _, _, data = self.upstream.request("GET", output["url"], headers={"Accept": "application/fhir+ndjson"})
+        for data in exported:
             for line in data.decode().splitlines():
                 if not line.strip():
                     continue
@@ -901,6 +940,37 @@ def require(token: Token, rtype: str, permission: str, context: str = "system") 
 # --- HTTP ----------------------------------------------------------------------------
 
 JOBS: dict[str, ExportJob] = {}
+JOBS_LOCK = threading.Lock()
+# How long a finished export (its manifest and files) stays available, and how
+# many exports one client may have running at a time.
+RETENTION = timedelta(seconds=int(os.environ.get("EXPORT_RETENTION_SECONDS", "3600")))
+MAX_RUNNING_PER_CLIENT = int(os.environ.get("EXPORT_MAX_RUNNING", "2"))
+
+
+def http_date(at: datetime) -> str:
+    return at.strftime("%a, %d %b %Y %H:%M:%S GMT")
+
+
+def sweep_jobs(now: datetime | None = None) -> int:
+    """Remove the expired jobs and their files; the number removed."""
+    now = now or datetime.now(timezone.utc)
+    with JOBS_LOCK:
+        expired = [j for j in JOBS.values() if j.expires_at and j.expires_at <= now]
+        for job in expired:
+            JOBS.pop(job.id, None)
+    for job in expired:
+        shutil.rmtree(job.dir, ignore_errors=True)
+    return len(expired)
+
+
+def sweeper() -> None:
+    interval = max(1.0, min(60.0, RETENTION.total_seconds() / 4))
+    while True:
+        threading.Event().wait(interval)
+        try:
+            sweep_jobs()
+        except Exception:  # noqa: BLE001 - the sweeper keeps running
+            traceback.print_exc()
 EXPORT_RE = re.compile(r"^Group/([A-Za-z0-9\-.]{1,64})/\$davinci-data-export$")
 BLOCKED_RE = re.compile(r"(^|/)\$export$")
 PRIOR_AUTH_RE = re.compile(r"^(Claim/\$(submit|inquire)|Questionnaire/\$questionnaire-package|"
@@ -1152,6 +1222,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, answer, "application/json")
 
     def prior_authorization(self, token: Token, path: str, method: str) -> None:
+        if self.prior_auth is None:
+            raise FhirError(501, "Prior authorization is not offered by this instance (--no-prior-auth)",
+                            "not-supported")
         provider = self.provider_id(token)
         base = self.public_base()
         if path == "Questionnaire/$questionnaire-package" and method == "POST":
@@ -1208,7 +1281,14 @@ class Handler(BaseHTTPRequestHandler):
         job.prepare()
         for rtype in job.types:
             require(token, rtype, "r")
-        JOBS[job.id] = job
+        with JOBS_LOCK:
+            running = sum(j.owner == token.client_id and j.status == "running" for j in JOBS.values())
+            if running >= MAX_RUNNING_PER_CLIENT:
+                # Bulk Data: "429 Too Many Requests" with Retry-After, as a server may.
+                raise FhirError(429, f"This client already has {running} export(s) running (at most "
+                                     f"{MAX_RUNNING_PER_CLIENT}); retry when one has finished", "throttled",
+                                {"Retry-After": "20"})
+            JOBS[job.id] = job
         threading.Thread(target=job.run, args=(self.public_base(),), daemon=True).start()
         return self.send(202, outcome("Export accepted", "informational", "information"),
                          headers={"Content-Location": f"{self.public_base()}/$export-status/{job.id}"})
@@ -1218,6 +1298,11 @@ class Handler(BaseHTTPRequestHandler):
         job = JOBS.get(job_id)
         if job is None or (job.owner != self.token.client_id and self.token.role != "admin"):
             raise FhirError(404, "Unknown export job", "not-found")
+        if job.expires_at and job.expires_at <= datetime.now(timezone.utc):
+            # Past the Expires the manifest announced: gone, as if swept already.
+            sweep_jobs()
+            raise FhirError(404, f"The export expired at {http_date(job.expires_at)}; its files were deleted",
+                            "not-found")
         if kind == "$export-file":
             if job.revoked:
                 raise revoked(job.group_id)
@@ -1226,7 +1311,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, (job.dir / name).read_bytes(), "application/fhir+ndjson")
         if method == "DELETE":
             job.cancelled = True
-            JOBS.pop(job.id, None)
+            with JOBS_LOCK:
+                JOBS.pop(job.id, None)
             shutil.rmtree(job.dir, ignore_errors=True)
             return self.send(202, outcome("Export cancelled", "informational", "information"))
         if job.status == "running":
@@ -1234,9 +1320,7 @@ class Handler(BaseHTTPRequestHandler):
         if job.status == "failed":
             status, oo = job.error
             return self.send(status, oo)
-        return self.send(200, job.manifest, "application/json",
-                         headers={"Expires": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime(
-                             "%a, %d %b %Y %H:%M:%S GMT")})
+        return self.send(200, job.manifest, "application/json", headers={"Expires": http_date(job.expires_at)})
 
     # --- upstream -------------------------------------------------------------------
 
@@ -1296,6 +1380,11 @@ def main() -> None:
     ap.add_argument("--upstream", default=os.environ.get("UPSTREAM_FHIR_URL", "http://localhost:8091/fhir"))
     ap.add_argument("--public-base", default=os.environ.get("PUBLIC_BASE_URL", "http://localhost:8092/fhir"),
                     help="this gateway's FHIR base, the audience its access tokens must have")
+    ap.add_argument("--token-audience", default=os.environ.get("TOKEN_AUDIENCE"),
+                    help="the audience its access tokens must have, when not its own FHIR base (a second "
+                         "instance of the same API)")
+    ap.add_argument("--no-prior-auth", action="store_true", default=os.environ.get("PRIOR_AUTH") == "off",
+                    help="do not run the prior authorization service (its notifications), as a second instance")
     ap.add_argument("--auth", default=os.environ.get("AUTH_INTERNAL_URL", "http://localhost:8093"),
                     help="the authorization server, as this gateway reaches it (for its keys)")
     ap.add_argument("--auth-public", default=os.environ.get("AUTH_PUBLIC_URL", "http://localhost:8093"),
@@ -1305,12 +1394,15 @@ def main() -> None:
     Handler.upstream = Upstream(args.upstream)
     Handler.api = args.api
     Handler.auth_public = args.auth_public.rstrip("/")
-    Handler.verifier = Verifier(f"{args.auth.rstrip('/')}/jwks", args.auth_public, args.public_base)
-    if args.api == "provider-access":
+    Handler.verifier = Verifier(f"{args.auth.rstrip('/')}/jwks", args.auth_public,
+                                args.token_audience or args.public_base)
+    threading.Thread(target=sweeper, daemon=True).start()
+    if args.api == "provider-access" and not args.no_prior_auth:
         Handler.prior_auth = prior_auth.PriorAuthService(Handler.upstream, args.public_base)
         Handler.prior_auth.start()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
-    print(f"FHIR gateway ({args.api}) on port {args.port}, upstream {args.upstream}", flush=True)
+    print(f"FHIR gateway ({args.api}) on port {args.port}, upstream {args.upstream}, exports kept "
+          f"{int(RETENTION.total_seconds())} s, at most {MAX_RUNNING_PER_CLIENT} running per client", flush=True)
     server.serve_forever()
 
 

@@ -558,6 +558,32 @@ export's files and status still served, the running export ending in a 502 from 
 gateway: an export of a deleted group was refused as another payer's (403) instead of not found
 (404).
 
+**Export file expiry** (`make fhir-up fhir-publish fhir-api-check fhir-provider-api-check
+fhir-security-check fhir-prior-auth-check`, run on 2026-11-14, servers recreated empty, in the order
+CI runs them). Before, the export status announced `Expires` an hour after each poll, so it never
+came, nothing enforced it, and jobs, their files and HAPI's own copies were never removed. The
+expiry is now fixed when a job ends and enforced; the checks see it through a second gateway
+instance that keeps exports 20 seconds (`fhir-gateway-expiry`, port 8095). 13 new checks, all
+passed, so 154 of 154 in `make fhir-provider-api-check`; the other API checks are unchanged (143,
+74 and 91, all passed):
+
+| Checks                                                                                  | Passed  |
+|-----------------------------------------------------------------------------------------|--------:|
+| An export accepted; a second one by the same client while it runs refused (429 with `Retry-After`) | 2 / 2 |
+| `Expires` the same on a later poll, about 20 seconds (19) after the job ended           | 3 / 3   |
+| Before `Expires`: the files served, the job's directory on disk; no Binary left on the server | 3 / 3 |
+| After `Expires`: the directory removed by the sweeper before any request, the status and the files 404 | 3 / 3 |
+| A restart: the finished job's files on disk before and gone after, its status and files 404 | 2 / 2 |
+
+To check that the checks can fail, the gateway was changed in five places (`Expires` an hour after
+each poll again, no expiry check on the status and files, no sweeper, HAPI's copies kept, no limit
+on running exports): 6 checks failed (the 429, the fixed `Expires`, the Binary count, the sweeper,
+the status and the files after `Expires`), and all passed again with the gateway restored. Two
+faults were found while building it: the second instance first took port 8094, which the prior
+authorization check's simulated EHR listens on, so it moved to 8095; and a local run after an
+older version found 169 Binary files HAPI had kept from earlier exports, which this change now
+deletes (a run from empty servers finds none).
+
 **API security** (`make fhir-up fhir-publish fhir-security-check`, run on 2026-11-12, from a clean
 environment). Both APIs now require a SMART access token, and the HAPI servers are reachable only
 through the gateways. The publish and the two API checks above ran through the gateways with

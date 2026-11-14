@@ -97,7 +97,8 @@ fhir-validate-all: ## The five validations above in one HL7 validator run (loadi
 
 fhir-up:   ## Start the HAPI FHIR servers empty (recreated each time), the SMART authorization server (http://localhost:8093) and the gateways: Patient Access at http://localhost:8090/fhir, Provider Access and Payer-to-Payer at http://localhost:8092/fhir
 	mkdir -p data/fhir_auth
-	docker compose --profile api up -d --build --force-recreate fhir-server fhir-server-provider fhir-auth fhir-gateway-patient fhir-gateway
+	docker compose --profile api up -d --build --force-recreate fhir-server fhir-server-provider fhir-auth fhir-gateway-patient fhir-gateway \
+		fhir-gateway-expiry
 
 fhir-clients: ## Register the SMART clients (the member app, one backend client per provider, two payers, the admin clients) and their keys in data/fhir_auth/ (after dbt)
 	$(PY) fhir/auth/clients.py

@@ -41,7 +41,17 @@ computed from the gold models, independently of the server:
                    export and the status of a running one answer 410, and a new
                    export is refused;
   $member-match    one member: a match, no match (422) and an unusable consent
-                   (422).
+                   (422);
+  export expiry    through fhir-gateway-expiry (the same API, keeping a finished
+                   export 20 seconds and one running export per client): a
+                   second export while one runs refused (429, Retry-After); the
+                   Expires the manifest announces fixed when the job ends; the
+                   files served until then; after it, the job's directory gone
+                   (removed by the sweeper, before any request), its status and
+                   files 404; after a restart, a finished job unknown and its
+                   files gone; and no copy left on the FHIR server (no Binary:
+                   the gateway deletes HAPI's export files once it has read
+                   them).
 
 Every call carries a SMART access token (Backend Services): each attribution
 list is read and exported by its own provider's client (provider-<id>), the
@@ -61,13 +71,15 @@ Usage (from the repository root, after make fhir-publish):
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from api_check import Checks, sample, without_meta
@@ -79,6 +91,8 @@ import lakehouse  # noqa: E402
 REPORT = Path("data/fhir_provider_api.json")
 MESSAGES = Path("data/fhir_provider_api/messages")
 DEFAULT_BASE = os.environ.get("FHIR_GATEWAY_URL", "http://localhost:8092/fhir")
+EXPIRY_BASE = os.environ.get("FHIR_GATEWAY_EXPIRY_URL", "http://localhost:8095/fhir")
+EXPIRY_CONTAINER = "payer-fhir-gateway-expiry"
 PROVIDER_SCOPE = "system/Patient.rs system/Coverage.rs system/ExplanationOfBenefit.rs system/Group.rs system/Organization.rs"
 PAYER_SCOPE = "system/Group.crds system/Patient.rs system/Coverage.r system/ExplanationOfBenefit.r system/Organization.r"
 ADMIN = BackendClient("admin-provider-access", "system/*.cruds")
@@ -625,10 +639,94 @@ def check_payer_to_payer(base: str, gold: Gold, checks: Checks) -> dict:
             "prior_auths_of_matched_members": all_pas, "prior_auths_in_scope": kept_pas}
 
 
+def job_dirs(container: str) -> list[str]:
+    """The export job directories in a gateway container."""
+    out = subprocess.run(["docker", "exec", container, "python", "-c",
+                          "import os, tempfile; d = os.path.join(tempfile.gettempdir(), 'fhir-gateway-jobs'); "
+                          "print(' '.join(sorted(os.listdir(d))) if os.path.isdir(d) else '')"],
+                         capture_output=True, text=True, check=True)
+    return out.stdout.split()
+
+
+def wait_up(base: str) -> None:
+    for _ in range(60):
+        try:
+            if call("GET", f"{base}/metadata")[0] == 200:
+                return
+        except (urllib.error.URLError, ConnectionError):
+            pass
+        time.sleep(2)
+    raise SystemExit(f"{base} did not come up")
+
+
+def finished(poll: str, client: BackendClient) -> tuple[int, dict, dict]:
+    started = time.time()
+    while True:
+        status, headers, body = call("GET", poll, headers={"Accept": "application/json"}, client=client)
+        if status != 202 or time.time() - started > 900:
+            return status, headers, body
+        time.sleep(1)
+
+
+def check_export_expiry(base: str, expiry_base: str, checks: Checks, group_id: str) -> dict:
+    """Exports expire: through the gateway instance that keeps them 20 seconds."""
+    group = "export expiry"
+    wait_up(expiry_base)
+    client = provider_client(group_id)
+    url = f"{expiry_base}/Group/{group_id}/$davinci-data-export"
+    body, prefer = parameters(_type="Patient"), {"Prefer": "respond-async"}
+    status, headers, _ = call("POST", url, body, prefer, client)
+    checks.add(group, "export accepted", 202, status)
+    poll = headers.get("Content-Location")
+    status, headers, _ = call("POST", url, body, prefer, client)
+    checks.add(group, "a second export while one runs: 429 with Retry-After", [429, True],
+               [status, bool(headers.get("Retry-After"))])
+    status, headers, manifest = finished(poll, client)
+    ended = datetime.now(timezone.utc)
+    checks.add(group, "export completed", 200, status)
+    expires = parsedate_to_datetime(headers["Expires"])
+    time.sleep(3)
+    again = call("GET", poll, headers={"Accept": "application/json"}, client=client)[1].get("Expires")
+    checks.add(group, "Expires fixed when the job ended (the same on a later poll)", headers["Expires"], again)
+    checks.add(group, "Expires: about 20 seconds after the job ended", True,
+               timedelta(seconds=15) <= expires - ended <= timedelta(seconds=21))
+    files = [o["url"] for o in manifest["output"] + manifest.get("error", [])]
+    get = lambda u: call("GET", u, headers={"Accept": "application/fhir+ndjson"}, client=client)[0]  # noqa: E731
+    checks.add(group, "before Expires: the files served", [200] * len(files), [get(u) for u in files])
+    status, _, count = call("GET", f"{base}/Binary?_summary=count", client=ADMIN)
+    checks.add(group, "no copy left on the FHIR server (Binary count)", [200, 0], [status, count.get("total")])
+    job_id = poll.rsplit("/", 1)[1]
+    checks.add(group, "before Expires: the job's directory on disk", True, job_id in job_dirs(EXPIRY_CONTAINER))
+
+    # Past Expires: the sweeper removes the job, before any request for it.
+    time.sleep(max(0.0, (expires - datetime.now(timezone.utc)).total_seconds()) + 7)
+    checks.add(group, "after Expires: the job's directory removed (sweeper)", False,
+               job_id in job_dirs(EXPIRY_CONTAINER))
+    checks.add(group, "after Expires: status 404", 404, call("GET", poll, client=client)[0])
+    checks.add(group, "after Expires: files 404", [404] * len(files), [get(u) for u in files])
+
+    # A restart: jobs live in memory, so their files on disk are removed at startup.
+    status, headers, _ = call("POST", url, body, prefer, client)
+    poll = headers.get("Content-Location")
+    status, _, manifest = finished(poll, client)
+    files = [o["url"] for o in manifest["output"]]
+    job_id = poll.rsplit("/", 1)[1]
+    present = job_id in job_dirs(EXPIRY_CONTAINER)
+    subprocess.run(["docker", "restart", EXPIRY_CONTAINER], capture_output=True, check=True)
+    wait_up(expiry_base)
+    checks.add(group, "restart: the finished job's files on disk before, gone after", [True, False],
+               [present, job_id in job_dirs(EXPIRY_CONTAINER)])
+    checks.add(group, "restart: the job's status and files 404", [404] + [404] * len(files),
+               [call("GET", poll, client=client)[0]] + [get(u) for u in files])
+    return {"retention_seconds": round((expires - ended).total_seconds())}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default=DEFAULT_BASE, help="FHIR gateway base URL")
     ap.add_argument("--groups", type=int, default=3, help="attribution lists to export")
+    ap.add_argument("--expiry-base", default=EXPIRY_BASE,
+                    help="the gateway instance that keeps exports 20 seconds (fhir-gateway-expiry)")
     args = ap.parse_args()
     base = args.base.rstrip("/")
     for _ in range(60):
@@ -653,6 +751,7 @@ def main() -> None:
         check_attribution(base, gold, checks, groups)
         timings = check_provider_exports(base, gold, checks, groups)
         p2p = check_payer_to_payer(base, gold, checks)
+        expiry = check_export_expiry(base, args.expiry_base.rstrip("/"), checks, groups[0])
     finally:
         con.close()
 
@@ -661,7 +760,7 @@ def main() -> None:
         by_group[r["group"]][0] += r["passed"]
         by_group[r["group"]][1] += 1
     report = {"gateway": base, "software": metadata.get("software"),
-              "snapshot_export_seconds": timings, "payer_to_payer": p2p,
+              "snapshot_export_seconds": timings, "payer_to_payer": p2p, "export_expiry": expiry,
               "passed": sum(r["passed"] for r in checks.results), "total": len(checks.results),
               "groups": {g: {"passed": p, "total": t} for g, (p, t) in by_group.items()},
               "failed": checks.failed, "checks": checks.results}

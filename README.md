@@ -160,6 +160,7 @@ FHIR APIs:
 make fhir-up              # start the FHIR servers empty, the SMART authorization server (http://localhost:8093)
                           #   and the gateways: Patient Access at http://localhost:8090/fhir,
                           #   Provider Access and Payer-to-Payer at http://localhost:8092/fhir
+                          #   (and at http://localhost:8095/fhir, keeping exports 20 s, for the expiry checks)
 make fhir-publish         # register the SMART clients (make fhir-clients) and load the gold FHIR resources into both
 make fhir-api-check       # check the Patient Access server against gold: counts, CARIN/PDex searches, Bulk $export
 make fhir-provider-api-check  # check the gateway against gold: attribution, $davinci-data-export, opt-outs, $bulk-member-match
@@ -248,12 +249,12 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **API security:** SMART on FHIR for the Patient Access API and SMART Backend Services for the provider and payer APIs, from a minimal authorization server, enforced in the gateways
 - [x] **Prior authorization exchange:** Da Vinci CRD, DTR and PAS 2.1.0 on the payer side, from the provider's order to the payer's decision, written to the legacy source and seen by the member
 - [x] **Payer-to-Payer consent at export:** each member's consent period kept on the match group and checked again when `$davinci-data-export` runs, and a revocation (the new payer deleting its match group), with checks for a consent that ends or is revoked between the member match and the export
+- [x] **Export file expiry:** the `Expires` the export status announces fixed when the job ends and enforced on the status and the files, expired jobs and files removed, HAPI's own copies deleted once read, a restart that leaves no file, and at most two running exports per client
 
 Backlog (not started), in the order planned:
 
 *API hardening*
 
-- [ ] **Export file expiry:** enforce the `Expires` the manifest announces on `$export-file`, clean up expired jobs and files, and check that they are no longer served
 - [ ] **Robust PAS notifications:** persist subscriptions and the record of what was notified (so a restart forgets nothing), retry failed deliveries with backoff, and restrict the rest-hook endpoints a subscription may use
 
 *Operations and scale*
