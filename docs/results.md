@@ -529,6 +529,35 @@ the request found three faults in the check itself: the coverages lacked `relati
 coverages to match had no member ID (HRex requires one, so those cases now carry one this payer
 does not know), and the resources had no narrative.
 
+**Payer-to-Payer consent at export** (`make fhir-up fhir-publish fhir-provider-api-check
+fhir-security-check fhir-validate-p2p`, run on 2026-11-14, on the data of an earlier local run).
+The match group now keeps each matched member's consent period (`member.period`), and
+`$davinci-data-export` checks it again on the day it runs; the new payer revokes the consent by
+deleting its match group. 12 new checks, all passed, so 141 of 141 in `make
+fhir-provider-api-check`:
+
+| Checks                                                                                  | Passed  |
+|-----------------------------------------------------------------------------------------|--------:|
+| Each of the 14 matched members' consent period on the stored match group                | 1 / 1   |
+| A consent that ended between the match and the export (a 3-member group, the first member's period ended yesterday): only the other two exported, the first reported in an OperationOutcome | 4 / 4 |
+| Revocation after that export finished: the deletion (200), its files (410), its status (410), a new export (404) | 4 / 4 |
+| Revocation during an export: accepted (202), deleted (200), then the status 410 with no manifest | 3 / 3 |
+
+The gateway judges a period against today, and a consent the match accepted is in force today, so
+the check ends it by editing the period stored on the group with the administration client, as
+time passing would. `make fhir-security-check` adds one refusal, the other payer deleting the new
+payer's match group (403): 74 of 74. `make fhir-validate-p2p` still finds 0 errors and 0
+warnings in the request and in the response, whose match group now carries the periods (the same
+known warnings and known IG error as before, counted apart).
+
+To check that the checks can fail, the gateway was changed in three places (no period check at
+export, a deletion that leaves its exports alone, no check that the group still exists before
+writing the files): 5 checks failed (the expired member exported and not reported, the finished
+export's files and status still served, the running export ending in a 502 from HAPI instead of a
+410), and all 141 passed again with the gateway restored. The first run found one fault of the
+gateway: an export of a deleted group was refused as another payer's (403) instead of not found
+(404).
+
 **API security** (`make fhir-up fhir-publish fhir-security-check`, run on 2026-11-12, from a clean
 environment). Both APIs now require a SMART access token, and the HAPI servers are reachable only
 through the gateways. The publish and the two API checks above ran through the gateways with
@@ -543,7 +572,7 @@ tokens and gave the same results (143 of 143 and 129 of 129); the publish took a
 | Member login: a wrong birth date, an unregistered redirect URI, no PKCE, a denial, a wrong PKCE verifier, a code used twice; the patient context and `id_token` | 9 / 9 |
 | Member app: its Patient, Coverage and claims equal to gold (with and without `patient`, across pages); another member's data by search, read and chain, a write, `$everything`, bulk export and Group refused; Organization readable; a token with fewer scopes; refresh token rotation | 17 / 17 |
 | Provider: an attributed member's Patient, Coverage and claims (without financial data) equal to gold; a member who opted out, a member not attributed (search and read by ID), a search without a member or naming two, another provider's list (read, search, export), `$bulk-member-match`, Consent and a write refused; an opt-out recorded during the check refused the next search, and removing it allowed it again; an export job invisible to another provider | 17 / 17 |
-| Other payer: the new payer matches a member; the other payer cannot read, search or export that match group, search Patient or read an attribution list; with a consent naming the new payer as the recipient, its own request leaves the member consent-constrained | 7 / 7 |
+| Other payer: the new payer matches a member; the other payer cannot read, search or export (nor, since 2026-11-14, delete) that match group, search Patient or read an attribution list; with a consent naming the new payer as the recipient, its own request leaves the member consent-constrained | 7 / 7 |
 
 The member who opted out in the provider checks had opted out before the attribution lists were
 built, so their list already left them out and the refusal comes from the attribution rule; the

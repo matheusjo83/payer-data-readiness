@@ -247,11 +247,19 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Provider Access and Payer-to-Payer APIs:** attribution lists from claims, opt-outs captured by CDC and checked at export, claims without financial data (CARIN Basis), and a gateway implementing the PDex `$davinci-data-export`, `$bulk-member-match` and HRex `$member-match`
 - [x] **API security:** SMART on FHIR for the Patient Access API and SMART Backend Services for the provider and payer APIs, from a minimal authorization server, enforced in the gateways
 - [x] **Prior authorization exchange:** Da Vinci CRD, DTR and PAS 2.1.0 on the payer side, from the provider's order to the payer's decision, written to the legacy source and seen by the member
+- [x] **Payer-to-Payer consent at export:** each member's consent period kept on the match group and checked again when `$davinci-data-export` runs, and a revocation (the new payer deleting its match group), with checks for a consent that ends or is revoked between the member match and the export
 
-Backlog (not started):
+Backlog (not started), in the order planned:
 
-- [ ] **Observable data quality:** the gold metrics over time (coverage, CDC latency, conformance, linkage) on a dashboard
-- [ ] **Scale:** many more members, measuring DuckLake and Splink as the data grows
+*API hardening*
+
+- [ ] **Export file expiry:** enforce the `Expires` the manifest announces on `$export-file`, clean up expired jobs and files, and check that they are no longer served
+- [ ] **Robust PAS notifications:** persist subscriptions and the record of what was notified (so a restart forgets nothing), retry failed deliveries with backoff, and restrict the rest-hook endpoints a subscription may use
+
+*Operations and scale*
+
+- [ ] **Data quality history:** store each run's metrics with its date, commit, scenario and volume, then a dashboard of load reliability, CDC latency, FHIR conformance and linkage quality over time
+- [ ] **Scale benchmark:** the current base, 10× and 30× (the PBM feed and its ground truth scaled with it), measuring initial load, incremental refresh and resources in DuckLake, and candidate pairs, blocking, precision and recall in Splink
 
 ## Project structure
 

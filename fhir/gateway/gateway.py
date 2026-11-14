@@ -37,13 +37,14 @@ Authorization. Every request but GET metadata and
                          identifier) calls $bulk-member-match and $member-match,
                          where a consent counts only if it names the calling
                          payer as the recipient, and reads, searches (by its
-                         identifier) and exports its own match groups.
+                         identifier), exports and deletes its own match groups.
   the administration     (role admin, system/*.cruds) everything the server
   client                 offers: publishing, the checks' counts.
 
 Each request also needs the scope of its interaction (r read, s search, c u d
 writes) on its resource type; an export needs r on Group and on every type
-exported, $bulk-member-match c on Group, $member-match s on Patient. A
+exported, $bulk-member-match c on Group, $member-match s on Patient, the
+deletion of a match group d on Group. A
 $davinci-data-export job, its status and its files belong to the client that
 started it (404 for any other).
 
@@ -63,6 +64,12 @@ The PDex operations (provider-access):
                       out, so an opt-out recorded after the list was built
                       applies ("SHALL check the consent status for each member
                       at the time of execution");
+        consent       Payer-to-Payer: a member whose consent period, kept on
+                      the match group (member.period), does not cover the day
+                      the export runs is left out, so a consent that ends after
+                      the match applies (PDex: "The Data Export operation SHALL
+                      check the consent status for each member at the time of
+                      execution");
         exportType    hl7.fhir.us.davinci-pdex#provider-snapshot (default for an
                       attribution list), #provider-download (the same data,
                       recorded as transmitted) and #provider-delta (only what
@@ -81,7 +88,14 @@ The PDex operations (provider-access):
       Matches each MemberBundle (HRex patient demographics, the coverage with
       this payer, the member's consent) and answers 200 with the PDex response
       Parameters: MatchedMembers (stored on the server, so the requesting payer
-      can export it), NonMatchedMembers and ConsentConstrainedMembers.
+      can export it), NonMatchedMembers and ConsentConstrainedMembers. Each
+      matched member's entry carries its consent's period (member.period);
+      characteristic.period.start is the date of the match.
+
+  DELETE [base]/Group/[id]   (a match group, by the payer that requested it)
+      Revokes the consent (PDex: "the New Payer manages the Consent Revocation
+      process"): the group is deleted, a new export of it is refused (404), and
+      its exports, finished or running, answer 410: no manifest, no files.
 
   POST [base]/Patient/$member-match   (Da Vinci HRex 1.1.0, one member)
       200 with MemberIdentifier and MemberId, or 422 with an OperationOutcome
@@ -322,6 +336,11 @@ def export_parameters(query: dict, body: bytes) -> dict:
     return params
 
 
+def revoked(group_id: str) -> FhirError:
+    return FhirError(410, f"Group/{group_id} was deleted by the requesting payer (the members' consent was "
+                          "revoked); its exports are no longer available", "deleted")
+
+
 class ExportJob:
     def __init__(self, upstream: Upstream, group_id: str, params: dict, request_url: str, owner: str | None = None):
         self.id = uuid.uuid4().hex
@@ -330,6 +349,14 @@ class ExportJob:
         self.status, self.progress, self.manifest, self.error = "running", "queued", None, None
         self.dir = JOBS_DIR / self.id
         self.cancelled = False
+        self.revoked = False
+
+    def revoke(self) -> None:
+        """The match group was deleted: the job fails and its files are removed."""
+        error = revoked(self.group_id)
+        self.revoked = self.cancelled = True
+        self.status, self.error, self.manifest = "failed", (error.status, outcome(error.message, error.code)), None
+        shutil.rmtree(self.dir, ignore_errors=True)
 
     def single(self, name: str) -> str | None:
         values = [v for v in self.params.get(name, []) if v]
@@ -342,9 +369,13 @@ class ExportJob:
 
     def run(self, public_base: str) -> None:
         try:
-            self.manifest = self.export(public_base)
-            self.status = "completed"
+            manifest = self.export(public_base)
+            if self.revoked:
+                return
+            self.manifest, self.status = manifest, "completed"
         except FhirError as e:
+            if self.revoked:
+                return
             self.status, self.error = "failed", (e.status, outcome(e.message, e.code))
         except Exception as e:  # noqa: BLE001 - reported to the client as a failed job
             traceback.print_exc()
@@ -381,6 +412,8 @@ class ExportJob:
     def export(self, public_base: str) -> dict:
         kind, export_type, types = self.kind, self.export_type, self.types
         group = self.upstream.read("Group", self.group_id)
+        if group is None:
+            raise revoked(self.group_id)
         type_filters = self.listed("_typeFilter")
         since, until = self.single("_since"), self.single("_until")
         until_at = parse_instant(until)
@@ -404,6 +437,18 @@ class ExportJob:
                 issues.append(outcome(f"{ref} has opted out of the Provider Access API; left out",
                                       "suppressed", "information"))
             selected = [r for r in selected if r not in opted_out]
+        if kind == "payertopayer":
+            # PDex: "The Data Export operation SHALL check the consent status for each
+            # member at the time of execution": the consent period kept at the match.
+            for ref in list(selected):
+                period = members[ref].get("period")
+                if not in_period(period, started.date()):
+                    when = (f"ended {period['end'][:10]}" if period.get("end")
+                            and date.fromisoformat(period["end"][:10]) < started.date()
+                            else f"starts {period.get('start', '')[:10]}")
+                    issues.append(outcome(f"{ref}: the member's consent to Payer-to-Payer exchange {when}; left out",
+                                          "suppressed", "information"))
+                    selected.remove(ref)
         selected_set = set(selected)
 
         # Kick off HAPI's Group export and wait for it.
@@ -471,6 +516,13 @@ class ExportJob:
         if "Organization" in types:
             needed = set().union(*(references(r) for rs in kept.values() for r in rs)) if kept else set()
             kept["Organization"] = [organizations[r] for r in sorted(needed) if r in organizations]
+
+        # A match group deleted while the export ran (the requesting payer revoked
+        # the consent) leaves no files.
+        if self.cancelled:
+            raise FhirError(404, "Export cancelled", "not-found")
+        if kind == "payertopayer" and self.upstream.read("Group", self.group_id) is None:
+            raise revoked(self.group_id)
 
         # Write the files and the manifest.
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -617,12 +669,20 @@ def consent_complies(consent: dict | None, day: date, caller: dict | None = None
     return True, "all data (regular policy)", recipient
 
 
+def consent_period(consent: dict) -> dict | None:
+    """The period of an HRex consent (provision.period), as start and end only."""
+    period = (consent.get("provision") or {}).get("period") or {}
+    return {k: period[k] for k in ("start", "end") if period.get(k)} or None
+
+
 def result_group(code: str, display: str, profile: str, recipient: dict | None, entries: list) -> dict:
-    """A PDex Member Match / No Match Group. entries: (input Patient, our Patient id or None, reason)."""
+    """A PDex Member Match / No Match Group. entries: (input Patient, our Patient id or None, reason[,
+    consent period]). A matched member's consent period goes on its member.period, which the
+    export checks again when it runs."""
     gid = f"p2p-{code}-{uuid.uuid4().hex[:16]}"
     contained, members = [], []
     used = set()
-    for n, (patient, our_id, reason) in enumerate(entries, start=1):
+    for n, (patient, our_id, reason, *period) in enumerate(entries, start=1):
         # The contained copy keeps the id the requester gave the Patient, so each
         # result can be traced to its MemberBundle (a position when it has none).
         cid = patient.get("id") if re.fullmatch(r"[A-Za-z0-9\-.]{1,64}", str(patient.get("id"))) else None
@@ -631,10 +691,13 @@ def result_group(code: str, display: str, profile: str, recipient: dict | None, 
         copy = {k: v for k, v in patient.items() if k not in ("meta", "text")}
         copy["id"] = cid
         contained.append(copy)
-        members.append({"entity": {
+        member = {"entity": {
             "extension": [{"url": MATCH_PARAMETERS_EXT, "valueReference": {"reference": f"#{cid}"}}],
             "reference": f"Patient/{our_id}" if our_id else f"#{cid}",
-            "display": reason}})
+            "display": reason}}
+        if period and period[0]:
+            member["period"] = period[0]
+        members.append(member)
     coding = {"system": MATCH_RESULT_CS, "code": code, "display": display}
     group = {
         "resourceType": "Group", "id": gid,
@@ -673,7 +736,8 @@ def bulk_member_match(upstream: Upstream, body: bytes, caller: dict | None = Non
         patient, coverage = bundle_part(parts, "MemberPatient"), bundle_part(parts, "CoverageToMatch")
         if not patient or not coverage:
             raise FhirError(400, "Each MemberBundle needs MemberPatient and CoverageToMatch", "required")
-        complies, consent_reason, recipient = consent_complies(bundle_part(parts, "Consent"), day, caller)
+        consent = bundle_part(parts, "Consent")
+        complies, consent_reason, recipient = consent_complies(consent, day, caller)
         if recipient:
             recipients.append(recipient)
         our_id, reason = match_member(upstream, patient, coverage)
@@ -682,7 +746,7 @@ def bulk_member_match(upstream: Upstream, body: bytes, caller: dict | None = Non
         elif not complies:
             constrained.append((patient, None, consent_reason))
         else:
-            matched.append((patient, our_id, reason))
+            matched.append((patient, our_id, reason, consent_period(consent)))
     # The requesting payer: the caller (its access token), or without one the
     # recipient the consents name (one request, one requester).
     requester = caller or (recipients[0] if recipients and all(r == recipients[0] for r in recipients) else None)
@@ -1017,8 +1081,10 @@ class Handler(BaseHTTPRequestHandler):
         kind, rtype, rid = interaction(path, method, query)
         if rtype != "Group":
             raise forbidden("Another payer may only match members and export its match groups")
-        self.rest_scope(token, kind, rtype)
         caller = token.payer_identifier or {}
+        if kind == "delete":
+            return self.revoke_match_group(token, rid, caller)
+        self.rest_scope(token, kind, rtype)
         if kind == "search":
             wanted = f"{caller.get('system')}|{caller.get('value')}"
             if [v for k, vs in query.items() if k == "identifier" for v in vs] != [wanted]:
@@ -1037,6 +1103,27 @@ class Handler(BaseHTTPRequestHandler):
                 if g.get("resourceType") not in ("Group", "OperationOutcome"):
                     raise forbidden(f"The answer holds a {g.get('resourceType')}, which this client may not see")
         self.send(status, data, headers.get("Content-Type", "application/fhir+json"))
+
+    def revoke_match_group(self, token: Token, group_id: str, caller: dict) -> None:
+        """The requesting payer deletes its match group (PDex: "the New Payer manages
+        the Consent Revocation process"): no further export of it, and its exports'
+        files, finished or not, are no longer served."""
+        require(token, "Group", "d")
+        group = self.upstream.read("Group", group_id)
+        if group is None:
+            raise FhirError(404, f"Group/{group_id} not found", "not-found")
+        if group_kind(group) != "payertopayer" or not any(same_identifier(i, caller)
+                                                          for i in group.get("identifier", [])):
+            raise forbidden("A payer may delete only its own match groups")
+        status, _, data = self.upstream.request("DELETE", f"Group/{urllib.parse.quote(group_id)}",
+                                                headers={"Accept": "application/fhir+json"})
+        if status not in (200, 204):
+            raise FhirError(502, f"Upstream delete failed with HTTP {status}: {data[:300].decode(errors='replace')}")
+        jobs = [j for j in list(JOBS.values()) if j.group_id == group_id]
+        for job in jobs:
+            job.revoke()
+        self.send(200, outcome(f"Group/{group_id} deleted: the consent is revoked, {len(jobs)} export(s) withdrawn",
+                               "informational", "information"))
 
     # --- prior authorization (Da Vinci CRD, DTR, PAS: prior_auth.py) ------------------
 
@@ -1108,7 +1195,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise forbidden("A provider may export only its own attribution list")
         elif token.role == "payer":
             group = self.upstream.read("Group", group_id)
-            if group is None or group_kind(group) != "payertopayer" or not any(
+            if group is None:  # never created, or deleted (a revoked consent)
+                raise FhirError(404, f"Group/{group_id} not found", "not-found")
+            if group_kind(group) != "payertopayer" or not any(
                     same_identifier(i, token.payer_identifier or {}) for i in group.get("identifier", [])):
                 raise forbidden("A payer may export only its own match groups")
         elif token.role != "admin":
@@ -1130,6 +1219,8 @@ class Handler(BaseHTTPRequestHandler):
         if job is None or (job.owner != self.token.client_id and self.token.role != "admin"):
             raise FhirError(404, "Unknown export job", "not-found")
         if kind == "$export-file":
+            if job.revoked:
+                raise revoked(job.group_id)
             if method != "GET" or not re.fullmatch(r"[A-Za-z]+\.ndjson", name) or not (job.dir / name).exists():
                 raise FhirError(404, "Unknown export file", "not-found")
             return self.send(200, (job.dir / name).read_bytes(), "application/fhir+ndjson")
