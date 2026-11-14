@@ -594,7 +594,7 @@ member each, for a service date a week ahead:
 
 The exchange the check saved (the CRD order, the DTR package and answers, the PAS request, the
 approved and pended responses, the inquiry and its response, the Subscription and a notification)
-validates against CRD, DTR and PAS 2.1.0 with tx.fhir.org with 0 errors and 0 warnings; 43 X12
+validates against CRD, DTR and PAS 2.1.0 with tx.fhir.org with 0 errors and 0 warnings; 36 X12
 codes are counted as unverified (licensed code lists) and 8 warnings as known (7 MB member
 identifier types, one value set the Subscriptions backport binds to and no R4 package has).
 Validating the first prototype found four gaps, which became decisions: the clinicians and medical
