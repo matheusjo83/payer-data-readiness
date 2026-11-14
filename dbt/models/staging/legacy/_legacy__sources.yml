@@ -25,6 +25,9 @@ sources:
         description: Claim lines. No foreign key to the header in the source.
       - name: pa_req
         identifier: legacy_pa_req_changes
+      - name: pa_doc
+        identifier: legacy_pa_doc_changes
+        description: Documentation received with a prior authorization request through Da Vinci PAS (the DTR answers, one row per item).
       - name: mbr_cnsnt
         identifier: legacy_mbr_cnsnt_changes
         description: Member data-sharing choices (Provider Access API opt-outs, type PAO).

@@ -70,7 +70,13 @@ This project was developed with AI assistance, using Claude Code (Anthropic's co
   HAPI server, the opt-outs as a legacy table captured by CDC, and PDex 2.1.0. For API security,
   Matheus chose a minimal SMART authorization server written for the project over Keycloak, the
   enforcement in the gateway over HAPI interceptors, and, for a provider's plain search, that it
-  must name one member on the provider's list who has not opted out.
+  must name one member on the provider's list who has not opted out. For the prior authorization
+  exchange, Matheus chose the payer side of all three Da Vinci guides (CRD, DTR and PAS 2.1.0)
+  with a script playing the provider, the requests written to the legacy table `pa_req` so that
+  CDC carries them to the member, deterministic rules with a simulated reviewer and Subscription
+  notifications; after a prototype, the ordering clinicians and medical record numbers kept in the
+  provider's simulated EHR, new `pa_req` columns and a documentation table, and two services that
+  need authorization (physical therapy and chest X-ray).
 - **Documentation.** Claude Code drafted the Results section (now in `docs/results.md`) and the
   README sections added from Phase 2 on (now in `docs/architecture.md`), the technical
   write-up and the migration checklist, in the language, format and voice Matheus chose. Matheus
@@ -158,13 +164,18 @@ make fhir-publish         # register the SMART clients (make fhir-clients) and l
 make fhir-api-check       # check the Patient Access server against gold: counts, CARIN/PDex searches, Bulk $export
 make fhir-provider-api-check  # check the gateway against gold: attribution, $davinci-data-export, opt-outs, $bulk-member-match
 make fhir-security-check  # check the SMART authorization: tokens, a member's own data only, attribution and opt-outs
+make fhir-prior-auth-check  # prior authorization end to end: CRD, DTR, PAS $submit/$inquire, review, notifications, the member's app
+make pa-review            # the simulated reviewer: decide the requests PAS pended
 make fhir-validate-p2p    # validate the Payer-to-Payer request and response the check saved (PDex 2.1.0)
-make fhir-validate-all    # fhir-validate-carin, -pdex, -provider and -p2p in one validator run, as CI does
+make fhir-validate-prior-auth  # validate the prior authorization exchange the check saved (CRD, DTR, PAS 2.1.0)
+make fhir-validate-all    # fhir-validate-carin, -pdex, -provider, -p2p and -prior-auth in one validator run, as CI does
 ```
 
-The legacy schema gained columns in Phase 6, `pa_req.req_amt` with the FHIR API and the table
-`mbr_cnsnt` with the Provider Access API. A database created before any of them needs `make reset`
-(which deletes the local data) and the Quickstart again.
+The legacy schema gained columns in Phase 6, `pa_req.req_amt` with the FHIR API, the table
+`mbr_cnsnt` with the Provider Access API, and seven `pa_req` columns and the table `pa_doc` with
+the prior authorization exchange. A database created before any of them needs a new legacy
+database (`make reset`, which deletes all local data, or only the `legacy_data` volume) and the
+Quickstart again.
 
 To watch change data capture at work, run the loader and the activity simulator side by side,
 then rebuild the models:
@@ -188,11 +199,12 @@ result against a full rebuild and against Postgres.
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up fhir-up seed pbm synthea ingest
 slot-drill dbt conformance fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check
-fhir-validate-all cdc-check` on a clean runner (`fhir-validate-all` runs the four `fhir-validate-*` samples with IGs
-in one HL7 validator run). The run fails
+fhir-prior-auth-check fhir-validate-all cdc-check` on a clean runner (`fhir-validate-all` runs the five
+`fhir-validate-*` samples with IGs in one HL7 validator run). The run fails
 if the slot drill fails, if a model or data test fails, if any shareable SQL on FHIR test fails, if
 the HL7 validator reports an error against the CARIN Blue Button or PDex profiles in the samples or
-the Payer-to-Payer messages, if a check of a FHIR API against gold or of its authorization fails, or if the incremental
+the Payer-to-Payer messages, or against CRD, DTR or PAS in the prior authorization exchange, if a check
+of a FHIR API against gold, of its authorization or of the prior authorization exchange fails, or if the incremental
 current state differs from a full rebuild or from Postgres.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
@@ -214,6 +226,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | FHIR API            | 42,550 resources (32,224 ExplanationOfBenefit, 3,000 of them prior authorizations) served by HAPI FHIR; 143 of 143 checks of counts, CARIN and PDex searches and a Bulk $export passed, every exported resource equal to gold |
 | Provider Access and Payer-to-Payer | 300 attribution lists from claims, 89 opted-out members left out and checked again at export; claims without financial data valid against the CARIN Basis profiles, attribution lists and opt-outs against PDex 2.1.0 (0 errors); 129 of 129 checks through the PDex gateway passed, including an opt-out added after the list was built and a 22-member `$bulk-member-match` |
 | API security        | SMART App Launch (PKCE) for Patient Access and SMART Backend Services (signed JWTs) for Provider Access and Payer-to-Payer; 73 of 73 checks passed: a member's app sees only that member, a provider only members on its list who have not opted out (an opt-out applies to the next search), another payer only its own match groups |
+| Prior authorization | Da Vinci CRD, DTR and PAS 2.1.0 on the payer side: 91 of 91 checks passed for 9 requests from two providers' simulated EHRs, from the order (coverage requirements) through the questionnaire, the submission (approved or pended on arrival), the reviewer's decisions and the Subscription notifications, to the legacy tables, gold (PDex) and the member's app; the exchange validates with 0 errors and 0 warnings |
 | Terminology         | Every ICD-10-CM, NDC and place of service code in the 29,224 exported claims valid on its service date (CMS and FDA releases); CPT, NUBC and NCPDP codes counted as unverified |
 
 ## Roadmap
@@ -233,10 +246,10 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **DuckLake:** a Postgres catalog with Parquet data, and an incremental CDC current state
 - [x] **Provider Access and Payer-to-Payer APIs:** attribution lists from claims, opt-outs captured by CDC and checked at export, claims without financial data (CARIN Basis), and a gateway implementing the PDex `$davinci-data-export`, `$bulk-member-match` and HRex `$member-match`
 - [x] **API security:** SMART on FHIR for the Patient Access API and SMART Backend Services for the provider and payer APIs, from a minimal authorization server, enforced in the gateways
+- [x] **Prior authorization exchange:** Da Vinci CRD, DTR and PAS 2.1.0 on the payer side, from the provider's order to the payer's decision, written to the legacy source and seen by the member
 
 Backlog (not started):
 
-- [ ] **Prior authorization exchange:** Da Vinci PAS, CRD and DTR, from the provider's request to the payer's decision
 - [ ] **Observable data quality:** the gold metrics over time (coverage, CDC latency, conformance, linkage) on a dashboard
 - [ ] **Scale:** many more members, measuring DuckLake and Splink as the data grows
 

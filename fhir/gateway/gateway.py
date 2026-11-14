@@ -87,6 +87,10 @@ The PDex operations (provider-access):
       200 with MemberIdentifier and MemberId, or 422 with an OperationOutcome
       when there is no unique match or the consent cannot be complied with.
 
+  Prior authorization (Da Vinci CRD, DTR and PAS 2.1.0, for providers): CDS Hooks
+  at /cds-services, Questionnaire/$questionnaire-package, Claim/$submit,
+  Claim/$inquire and PAS Subscriptions, in prior_auth.py.
+
   GET  [base]/metadata
       HAPI's CapabilityStatement, with these operations and the PDex
       provider-access and payer-access server CapabilityStatements declared.
@@ -106,7 +110,7 @@ policy (all data): this payer does not label sensitive data, so a request for
 non-sensitive data only (#sensitive) cannot be complied with and the member is
 consent-constrained.
 
-Python with PyJWT and cryptography (fhir/gateway/Dockerfile), this directory
+Python with PyJWT, cryptography and psycopg (fhir/gateway/Dockerfile), this directory
 mounted.
 
 Usage:
@@ -135,6 +139,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from smart import Token, Unauthorized, Verifier, security, smart_configuration  # noqa: E402
+import prior_auth  # noqa: E402
 
 PDEX = "http://hl7.org/fhir/us/davinci-pdex/"
 HREX = "http://hl7.org/fhir/us/davinci-hrex/"
@@ -733,6 +738,7 @@ def capability_statement(upstream: Upstream, api: str, auth_public: str) -> dict
     cs["instantiates"] = [PDEX + "CapabilityStatement/pdex-provider-access-server",
                           PDEX + "CapabilityStatement/pdex-payer-access-server"]
     for rest in cs.get("rest", []):
+        prior_auth.add_capabilities(rest)
         # The Bulk $export operations are refused here (see the module docstring).
         rest["operation"] = [op for op in rest.get("operation", []) if op.get("name") != "export"]
         for res in rest.get("resource", []):
@@ -833,6 +839,8 @@ def require(token: Token, rtype: str, permission: str, context: str = "system") 
 JOBS: dict[str, ExportJob] = {}
 EXPORT_RE = re.compile(r"^Group/([A-Za-z0-9\-.]{1,64})/\$davinci-data-export$")
 BLOCKED_RE = re.compile(r"(^|/)\$export$")
+PRIOR_AUTH_RE = re.compile(r"^(Claim/\$(submit|inquire)|Questionnaire/\$questionnaire-package|"
+                           r"Subscription(/[A-Za-z0-9\-]{1,64}(/\$status)?)?)$")
 HAPI_EXPORT_RE = re.compile(r"(^|/)\$export(-poll-status)?$|^Binary/")
 PASSTHROUGH_HEADERS = ("Accept", "Content-Type", "Prefer", "Cache-Control", "If-Match", "If-None-Exist")
 
@@ -843,6 +851,7 @@ class Handler(BaseHTTPRequestHandler):
     api: str = "provider-access"
     verifier: Verifier = None
     auth_public: str = ""
+    prior_auth: "prior_auth.PriorAuthService" = None
 
     def public_base(self) -> str:
         return f"http://{self.headers.get('Host', 'localhost')}/fhir"
@@ -865,8 +874,21 @@ class Handler(BaseHTTPRequestHandler):
             self._body = self.rfile.read(length) if length else b""
         return self._body
 
+    def authorize(self) -> Token:
+        try:
+            token = self.verifier.verify(self.headers.get("Authorization"))
+        except Unauthorized as e:
+            raise FhirError(401, str(e), "login", {"WWW-Authenticate": f'Bearer realm="{self.api}", '
+                                                                      f'error="invalid_token"'}) from e
+        if token.claims.get("api") != self.api:
+            raise FhirError(401, f"The access token was not issued for the {self.api} API", "login")
+        self.token = token
+        return token
+
     def handle_any(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
+        if self.api == "provider-access" and (parsed.path == "/cds-services" or parsed.path.startswith("/cds-services/")):
+            return self.cds_hooks(parsed.path.strip("/"))
         if not (parsed.path == "/fhir" or parsed.path.startswith("/fhir/")):
             raise FhirError(404, "The FHIR base is /fhir", "not-found")
         path = parsed.path[len("/fhir"):].strip("/")
@@ -878,14 +900,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == ".well-known/smart-configuration" and method == "GET":
             return self.send(200, smart_configuration(self.auth_public, backend=self.api == "provider-access"),
                              "application/json")
-        try:
-            token = self.verifier.verify(self.headers.get("Authorization"))
-        except Unauthorized as e:
-            raise FhirError(401, str(e), "login", {"WWW-Authenticate": f'Bearer realm="{self.api}", '
-                                                                      f'error="invalid_token"'}) from e
-        if token.claims.get("api") != self.api:
-            raise FhirError(401, f"The access token was not issued for the {self.api} API", "login")
-        self.token = token
+        token = self.authorize()
 
         if path.startswith("$export-status/") or path.startswith("$export-file/"):
             return self.export_job(path, method)
@@ -894,6 +909,8 @@ class Handler(BaseHTTPRequestHandler):
                 require(token, "*", "r")
                 return self.passthrough(path, parsed.query)
             return self.patient_access(token, path, query, method)
+        if PRIOR_AUTH_RE.match(path):
+            return self.prior_authorization(token, path, method)
         if BLOCKED_RE.search(path):
             raise FhirError(400, "Bulk $export is not offered here: it would bypass the opt-out check. Use "
                                  "POST Group/[id]/$davinci-data-export", "not-supported")
@@ -1021,6 +1038,61 @@ class Handler(BaseHTTPRequestHandler):
                     raise forbidden(f"The answer holds a {g.get('resourceType')}, which this client may not see")
         self.send(status, data, headers.get("Content-Type", "application/fhir+json"))
 
+    # --- prior authorization (Da Vinci CRD, DTR, PAS: prior_auth.py) ------------------
+
+    def provider_id(self, token: Token) -> str:
+        if token.role != "provider" or not (token.fhir_user or "").startswith("Organization/"):
+            raise forbidden("Prior authorization is for providers (a token acting for an Organization)")
+        return token.fhir_user.removeprefix("Organization/")
+
+    def json_body(self) -> dict:
+        try:
+            body = json.loads(self.body() or b"null")
+        except json.JSONDecodeError as e:
+            raise FhirError(400, f"The body is not JSON: {e}", "invalid") from e
+        if not isinstance(body, dict):
+            raise FhirError(400, "The body must be a JSON object", "invalid")
+        return body
+
+    def cds_hooks(self, path: str) -> None:
+        # Discovery is public, as metadata is; a service call needs a provider's token.
+        if path == "cds-services" and self.command == "GET":
+            return self.send(200, prior_auth.cds_discovery(), "application/json")
+        self.provider_id(self.authorize())
+        if self.command != "POST":
+            raise FhirError(405, "A CDS service is called with POST", "not-supported")
+        answer = prior_auth.cds_service(self.upstream, path.removeprefix("cds-services/"), self.json_body())
+        self.send(200, answer, "application/json")
+
+    def prior_authorization(self, token: Token, path: str, method: str) -> None:
+        provider = self.provider_id(token)
+        base = self.public_base()
+        if path == "Questionnaire/$questionnaire-package" and method == "POST":
+            require(token, "Questionnaire", "r")
+            return self.send(200, prior_auth.questionnaire_package(self.json_body()))
+        if path == "Claim/$submit" and method == "POST":
+            require(token, "Claim", "c")
+            return self.send(200, prior_auth.submit(self.upstream, base, provider, self.json_body(), self.prior_auth))
+        if path == "Claim/$inquire" and method == "POST":
+            require(token, "Claim", "r")
+            return self.send(200, prior_auth.inquire(self.upstream, base, provider, self.json_body()))
+        parts = path.split("/")
+        if path == "Subscription" and method == "POST":
+            require(token, "Subscription", "c")
+            created = self.prior_auth.create(provider, self.json_body())
+            return self.send(201, created, headers={"Location": f"{base}/Subscription/{created['id']}"})
+        if len(parts) == 2 and method == "GET":
+            require(token, "Subscription", "r")
+            return self.send(200, self.prior_auth.get(provider, parts[1])["resource"])
+        if len(parts) == 2 and method == "DELETE":
+            require(token, "Subscription", "d")
+            self.prior_auth.delete(provider, parts[1])
+            return self.send(200, outcome("Subscription deleted", "informational", "information"))
+        if len(parts) == 3 and parts[2] == "$status" and method == "GET":
+            require(token, "Subscription", "r")
+            return self.send(200, self.prior_auth.status_bundle(provider, parts[1]))
+        raise FhirError(405, f"{method} {path} is not offered", "not-supported")
+
     # --- $davinci-data-export -------------------------------------------------------
 
     def start_export(self, group_id: str, path: str, parsed, query: dict, method: str) -> None:
@@ -1113,6 +1185,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_any()
         except FhirError as e:
             self.send(e.status, outcome(e.message, e.code), headers=e.headers)
+        except prior_auth.PAError as e:
+            self.send(e.status, outcome(e.message, e.code))
         except Exception as e:  # noqa: BLE001 - answered as an OperationOutcome
             traceback.print_exc()
             self.send(500, outcome(f"Gateway error: {e}", "exception"))
@@ -1141,6 +1215,9 @@ def main() -> None:
     Handler.api = args.api
     Handler.auth_public = args.auth_public.rstrip("/")
     Handler.verifier = Verifier(f"{args.auth.rstrip('/')}/jwks", args.auth_public, args.public_base)
+    if args.api == "provider-access":
+        Handler.prior_auth = prior_auth.PriorAuthService(Handler.upstream, args.public_base)
+        Handler.prior_auth.start()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     print(f"FHIR gateway ({args.api}) on port {args.port}, upstream {args.upstream}", flush=True)
     server.serve_forever()

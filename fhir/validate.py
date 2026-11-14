@@ -52,6 +52,14 @@ Two modes:
                    HRex demographics, coverages and consents of the request and
                    the match groups of the response are checked too. Writes
                    data/fhir_validation_payer-to-payer/.
+  --ig prior-auth  the prior authorization exchange that make fhir-prior-auth-check
+                   saved (data/fhir_prior_auth/messages/): the CRD order with its
+                   coverage information, the DTR questionnaire package and answers,
+                   the PAS request, responses (approved and pended), inquiry and
+                   inquiry response, the PAS Subscription and a notification, against
+                   Da Vinci CRD, DTR and PAS 2.1.0 (the questionnaires the answers
+                   follow are loaded from data/fhir_prior_auth/definitions/). Writes
+                   data/fhir_validation_prior-auth/.
 
 Usage (from the repository root, Java 17+ required):
     python fhir/validate.py                 # base FHIR R4
@@ -59,8 +67,8 @@ Usage (from the repository root, Java 17+ required):
     python fhir/validate.py --ig carin-bb   # CARIN Blue Button 2.1.0
     python fhir/validate.py --ig carin-bb --tx https://tx.fhir.org   # with terminology
     python fhir/validate.py --ig pdex --tx https://tx.fhir.org        # PDex prior authorizations
-    python fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer --tx https://tx.fhir.org
-                                            # all four in one validator run (make fhir-validate-all)
+    python fhir/validate.py --ig carin-bb pdex provider-access payer-to-payer prior-auth --tx https://tx.fhir.org
+                                            # all five in one validator run (make fhir-validate-all)
 
 Exits with status 1 if any sample has an error, if a sample is empty, or (with
 --ig) if a sampled resource references a resource that is not exported.
@@ -156,9 +164,30 @@ PAYER_TO_PAYER_FILES = {
     "MatchRequest": "bulk-member-match-in.json",
     "MatchResponse": "bulk-member-match-out.json",
 }
+# The prior authorization exchange (Da Vinci CRD, DTR, PAS 2.1.0), as make
+# fhir-prior-auth-check saved it; the questionnaires come from the payer's DTR
+# package and are loaded as definitions.
+PRIOR_AUTH_DIR = Path("data/fhir_prior_auth")
+PRIOR_AUTH_FILES = {
+    "CrdOrder": "crd-order.json",
+    "DtrPackage": "dtr-questionnaire-package-out.json",
+    "DtrResponse": "dtr-questionnaire-response.json",
+    "PasRequest": "pas-submit-in.json",
+    "PasApproved": "pas-submit-out-approved.json",
+    "PasPended": "pas-submit-out-pended.json",
+    "PasInquiry": "pas-inquire-in.json",
+    "PasInquiryResponse": "pas-inquire-out.json",
+    "PasSubscription": "pas-subscription.json",
+    "PasNotification": "pas-notification.json",
+}
+PAS_PACKAGES = ["hl7.fhir.us.davinci-pas#2.1.0", "hl7.fhir.us.davinci-crd#2.1.0", "hl7.fhir.us.davinci-dtr#2.1.0",
+                str(PRIOR_AUTH_DIR / "definitions")]
 IGS = {"carin-bb": ([CARIN_PACKAGE], CARIN_SAMPLES), "pdex": ([PDEX_PACKAGE], PDEX_SAMPLES),
        "provider-access": ([CARIN_PACKAGE, PDEX_PACKAGE], PROVIDER_ACCESS_SAMPLES),
-       "payer-to-payer": ([PDEX_PACKAGE], PAYER_TO_PAYER_FILES)}
+       "payer-to-payer": ([PDEX_PACKAGE], PAYER_TO_PAYER_FILES),
+       "prior-auth": (PAS_PACKAGES, PRIOR_AUTH_FILES)}
+MESSAGE_DIRS = {"payer-to-payer": (MESSAGES_DIR, "make fhir-provider-api-check"),
+                "prior-auth": (PRIOR_AUTH_DIR / "messages", "make fhir-prior-auth-check")}
 BUNDLE_BASE = "https://payer-data-readiness.example/fhir/"
 SAMPLE_SEED = 42
 # Code systems whose content is not distributed (the terminology package has
@@ -174,8 +203,16 @@ UNDISTRIBUTED_CODE_SYSTEMS = {
     "https://www.nubc.org/CodeSystem/RevenueCodes",
     "https://nahdo.org/sopt",
     # X12 306, the review action code of the PDex prior authorizations: X12 code
-    # lists are licensed and no package or terminology server here has them.
+    # lists are licensed and no package or terminology server here has them. The
+    # others are the X12 codes Da Vinci PAS requires: entity identifier (98),
+    # service type (1365), request type (1525), certification type (1322) and
+    # individual relationship (1069).
     "https://codesystem.x12.org/005010/306",
+    "https://codesystem.x12.org/005010/98",
+    "https://codesystem.x12.org/005010/1365",
+    "https://codesystem.x12.org/005010/1525",
+    "https://codesystem.x12.org/005010/1322",
+    "https://codesystem.x12.org/005010/1069",
 }
 # Value sets in the same situation (the validator reports them as not found).
 UNDISTRIBUTED_VALUE_SET_PREFIXES = ("https://valueset.x12.org/",)
@@ -221,6 +258,13 @@ KNOWN_WARNINGS = {
                             and "atr-coverage" in text and "us-core-coverage" in text,
         "the Coverage conforms to both profiles the ATR coverage reference allows (US Core 7.0.0 and ATR), "
         "and the validator notes the ambiguity"),
+    # The Subscriptions R4 Backport binds the notification type of its status
+    # Parameters to the R5 value set subscription-notification-type, which no R4
+    # package has (tx.fhir.org neither); the codes are the backport's own.
+    "backport_notification_type": (
+        lambda text, where: "ValueSet 'http://hl7.org/fhir/ValueSet/subscription-notification-type' not found" in text,
+        "the Subscriptions R4 Backport binds the notification type to an R5 value set that no R4 package or "
+        "tx.fhir.org has"),
 }
 
 
@@ -321,15 +365,16 @@ def export_sample(sample: int, samples: dict, bundles: bool, input_dir: Path) ->
     return counts, unresolved
 
 
-def copy_messages(files: dict, input_dir: Path) -> tuple[dict, dict]:
-    """The Payer-to-Payer messages, as they are (they declare their PDex profiles)."""
+def copy_messages(files: dict, input_dir: Path, mode: str) -> tuple[dict, dict]:
+    """Messages a check saved, as they are (they declare their profiles)."""
+    source, producer = MESSAGE_DIRS[mode]
     shutil.rmtree(input_dir, ignore_errors=True)
     input_dir.mkdir(parents=True)
-    missing = [name for name in files.values() if not (MESSAGES_DIR / name).exists()]
+    missing = [name for name in files.values() if not (source / name).exists()]
     if missing:
-        raise SystemExit(f"Missing {missing} in {MESSAGES_DIR}: run make fhir-provider-api-check first")
+        raise SystemExit(f"Missing {missing} in {source}: run {producer} first")
     for label, name in files.items():
-        shutil.copy(MESSAGES_DIR / name, input_dir / f"{label}-{name}")
+        shutil.copy(source / name, input_dir / f"{label}-{name}")
     return {label: 1 for label in files}, {}
 
 
@@ -476,8 +521,8 @@ def main() -> None:
         inputs[m] = input_dir
         mode_packages, samples = IGS[m] if m else ([CARIN_PACKAGE], BASE_SAMPLES)
         packages += [p for p in mode_packages if p not in packages]
-        if m == "payer-to-payer":
-            counts[m], unresolved[m] = copy_messages(samples, input_dir)
+        if m in MESSAGE_DIRS:
+            counts[m], unresolved[m] = copy_messages(samples, input_dir, m)
         else:
             sample = args.sample or (20 if m == "provider-access" else 200)
             counts[m], unresolved[m] = export_sample(sample, samples, bundles=bool(m), input_dir=input_dir)

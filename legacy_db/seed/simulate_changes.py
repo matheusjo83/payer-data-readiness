@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 
 import psycopg
 
-from claim_details import claim_details, diagnosis_on
+from claim_details import claim_details, diagnosis_on, prior_auth_details
 
 # Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
 PG_DSN = os.environ.get(
@@ -91,13 +91,18 @@ class Simulator:
     def new_prior_auth(self, cur, now) -> bool:
         pa_id = f"PA{self.next_pa:012d}"
         self.next_pa += 1
+        # Requests come from members with coverage today, as new claims do, through
+        # the legacy channel (requests through Da Vinci PAS come from the PAS service).
+        mbr_id, prv_id = random.choice(list(self.active_coverage)), random.choice(self.provider_ids)
+        svc_cd, urgent = random.choice(PROC_CODES), "Y" if random.random() < 0.2 else "N"
+        amount = round(random.uniform(40, 1500), 2)
+        d = prior_auth_details(random, svc_cd, random.choice(DX_CODES), now.date())
         cur.execute(
-            "INSERT INTO pa_req (pa_id, mbr_id, prv_id, svc_cd, urgnt_flg, req_ts, dcsn_ts, dcsn_cd, req_amt, upd_ts) "
-            "VALUES (%s, %s, %s, %s, %s, %s, NULL, 'P', %s, %s)",
-            # Requests come from members with coverage today, as new claims do.
-            [pa_id, random.choice(list(self.active_coverage)), random.choice(self.provider_ids),
-             random.choice(PROC_CODES), "Y" if random.random() < 0.2 else "N", now,
-             round(random.uniform(40, 1500), 2), now],
+            "INSERT INTO pa_req (pa_id, mbr_id, prv_id, svc_cd, urgnt_flg, req_ts, dcsn_ts, dcsn_cd, req_amt, "
+            "dx_cd, pos_cd, svc_dt, svc_qty, src_cd, upd_ts) "
+            "VALUES (%s, %s, %s, %s, %s, %s, NULL, 'P', %s, %s, %s, %s, %s, 'L', %s)",
+            [pa_id, mbr_id, prv_id, svc_cd, urgent, now, amount,
+             d["dx_cd"], d["pos_cd"], d["svc_dt"], d["svc_qty"], now],
         )
         return True
 

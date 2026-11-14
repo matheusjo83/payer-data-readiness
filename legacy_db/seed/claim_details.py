@@ -10,7 +10,7 @@ every figure derived from it, stays the same.
 """
 
 import random
-from datetime import date
+from datetime import date, timedelta
 
 POS_CODES = ["11", "11", "11", "22", "23", "02"]          # office, outpatient hospital, ER, telehealth
 REVENUE_CODES = ["0250", "0300", "0320", "0450", "0510"]  # pharmacy, lab, radiology, ER, clinic
@@ -71,3 +71,18 @@ def claim_details(rng: random.Random, claim_type: str, svc_from: date, svc_to: d
         for line in lines:
             line["ndc_cd"] = rng.choice(NDC_CODES)
     return header, lines
+
+
+# Prior authorization request details (pa_req), drawn the same way: the place of
+# service and the quantity depend on the service, the requested service starts one
+# to fourteen days after the request.
+PA_POS_CODES = {"97110": ["11", "11", "22"], "71046": ["11", "22", "22"], "99285": ["23"]}
+
+
+def prior_auth_details(rng: random.Random, svc_cd: str, dx_cd: str, requested: date) -> dict:
+    svc_dt = requested + timedelta(days=rng.randint(1, 14))
+    return {"dx_cd": diagnosis_on(dx_cd, svc_dt),
+            "pos_cd": rng.choice(PA_POS_CODES.get(svc_cd, ["11"])),
+            "svc_dt": svc_dt.strftime("%Y%m%d"),
+            "svc_qty": rng.randint(6, 24) if svc_cd == "97110" else 1}
+

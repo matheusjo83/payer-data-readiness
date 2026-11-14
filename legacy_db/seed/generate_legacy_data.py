@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 
 import psycopg
 
-from claim_details import claim_details, diagnosis_on
+from claim_details import claim_details, diagnosis_on, prior_auth_details
 
 # Override with LEGACY_PG_DSN (e.g. inside the Airflow container).
 PG_DSN = os.environ.get(
@@ -65,6 +65,7 @@ DX_CODES = ["E11.9", "I10", "J06.9", "M54.5", "Z00.00", "E78.5", "F41.1",
 # Column order of the dicts returned by claim_details().
 CLAIM_DETAIL_COLS = ["ntwk_cd", "bill_typ_cd", "pos_cd", "days_sply", "daw_cd", "rfl_nbr", "rfl_auth"]
 LINE_DETAIL_COLS = ["ndc_cd", "rev_cd"]
+PA_DETAIL_COLS = ["dx_cd", "pos_cd", "svc_dt", "svc_qty"]
 
 
 def ymd(d: date) -> str:
@@ -222,6 +223,7 @@ def main() -> None:
     # timeliness figures do not change. That and the requested amount come from a
     # separate random generator, so no other table changes either.
     pa_rng = random.Random(args.seed + 4)
+    pa_detail_rng = random.Random(args.seed + 6)
     pas, pas_moved = [], 0
     for i in range(args.prior_auths):
         urgent = "Y" if random.random() < 0.2 else "N"
@@ -239,7 +241,12 @@ def main() -> None:
             pas_moved += 1
         dcsn_ts = None if hours is None else req + timedelta(hours=hours)
         amount = round(pa_rng.uniform(40, 1500), 2)
-        pas.append((f"PA{i + 1:012d}", mid, prv, svc, urgent, req, dcsn_ts, dcsn, amount, now))
+        # Diagnosis, place of service, service date and quantity (the fields Da Vinci
+        # PAS needs) come from yet another generator, so nothing above changes. These
+        # requests came through the legacy channel (L): no PAS submission, no NPI.
+        details = prior_auth_details(pa_detail_rng, svc, pa_detail_rng.choice(DX_CODES), req.date())
+        pas.append((f"PA{i + 1:012d}", mid, prv, svc, urgent, req, dcsn_ts, dcsn, amount,
+                    *(details[c] for c in PA_DETAIL_COLS), "L", None, None, now))
 
     # Provider Access API opt-outs (CMS-0057-F lets members opt out of having their
     # data available to their providers), from their own random generator, so no
@@ -256,7 +263,7 @@ def main() -> None:
                          now - timedelta(days=consent_rng.randint(0, 30))))
 
     with connect_with_retry(PG_DSN) as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE pln, mbr_mstr, elig_span, prv, clm_hdr, clm_ln, pa_req, mbr_cnsnt RESTART IDENTITY")
+        cur.execute("TRUNCATE pln, mbr_mstr, elig_span, prv, clm_hdr, clm_ln, pa_req, pa_doc, mbr_cnsnt RESTART IDENTITY")
         copy_rows(cur, "pln", ["pln_id", "pln_nm", "lob_cd", "eff_dt", "term_dt"], plans)
         copy_rows(cur, "mbr_mstr", ["mbr_id", "fst_nm", "lst_nm", "dob", "gndr_cd",
                                     "zip_cd", "st_cd", "upd_ts"], members)
@@ -268,7 +275,8 @@ def main() -> None:
         copy_rows(cur, "clm_ln", ["clm_id", "ln_nbr", "proc_cd", "dx_cd", "units",
                                   "chrg_amt", "pd_amt", *LINE_DETAIL_COLS, "upd_ts"], lines)
         copy_rows(cur, "pa_req", ["pa_id", "mbr_id", "prv_id", "svc_cd", "urgnt_flg",
-                                  "req_ts", "dcsn_ts", "dcsn_cd", "req_amt", "upd_ts"], pas)
+                                  "req_ts", "dcsn_ts", "dcsn_cd", "req_amt", *PA_DETAIL_COLS,
+                                  "src_cd", "sbmsn_id", "rqstr_npi", "upd_ts"], pas)
         copy_rows(cur, "mbr_cnsnt", ["cnsnt_id", "mbr_id", "cnsnt_typ", "eff_dt", "term_dt", "upd_ts"], consents)
         conn.commit()
 

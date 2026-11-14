@@ -159,6 +159,65 @@ models:
       - name: requested_amount
         description: Estimated cost of the requested service (legacy req_amt).
         data_tests: [not_null]
+      - name: diagnosis_code
+        description: Primary diagnosis of the request (ICD-10-CM, with the dot).
+        data_tests: [not_null]
+      - name: place_of_service_code
+        description: Place of service of the requested service (CMS place of service code).
+        data_tests: [not_null]
+      - name: service_date
+        description: Day the requested service is to start.
+        data_tests: [not_null]
+      - name: service_quantity
+        description: Units or visits requested.
+        data_tests: [not_null]
+      - name: channel
+        description: >
+          How the request arrived: legacy (fax or portal, the generated history) or pas (Da Vinci
+          PAS `$submit`, written by the payer's PAS service).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['legacy', 'pas']
+      - name: submission_id
+        description: The provider's request number (the PAS Claim identifier), unique per provider. Null for the legacy channel.
+      - name: requester_npi
+        description: NPI of the ordering practitioner, as received in the PAS request. Null for the legacy channel.
+      - name: updated_at
+        description: Last update of the legacy row.
+
+  - name: stg_legacy__prior_auth_documents
+    description: >
+      Documentation received with prior authorization requests through Da Vinci PAS: the answers of
+      the Da Vinci DTR questionnaire, one row per item.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [prior_auth_id, item_id]
+    columns:
+      - name: prior_auth_id
+        description: "{{ doc('prior_auth_id') }}"
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_legacy__prior_auths')
+                field: prior_auth_id
+      - name: questionnaire
+        description: Canonical URL of the questionnaire, with its version (`url|version`).
+        data_tests: [not_null]
+      - name: item_id
+        description: The questionnaire item (linkId).
+        data_tests: [not_null]
+      - name: answer
+        description: The answer as text (true or false for a yes/no item).
+      - name: answer_source
+        description: auto (populated from the provider's record), override (populated, then changed) or manual.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['auto', 'override', 'manual']
       - name: updated_at
         description: Last update of the legacy row.
 

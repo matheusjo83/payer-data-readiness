@@ -89,7 +89,24 @@ CREATE TABLE pa_req (             -- prior authorization requests
     dcsn_ts     TIMESTAMP,        -- NULL while pending
     dcsn_cd     CHAR(1),          -- A approved, D denied, P pending
     req_amt     NUMERIC(12,2),    -- estimated cost of the requested service
+    dx_cd       VARCHAR(8),       -- primary diagnosis (ICD-10-CM, with the dot)
+    pos_cd      VARCHAR(2),       -- place of service (CMS)
+    svc_dt      VARCHAR(8),       -- requested service start, 'YYYYMMDD'
+    svc_qty     INTEGER,          -- units or visits requested
+    src_cd      CHAR(1),          -- channel: L legacy (fax, portal), F FHIR (Da Vinci PAS)
+    sbmsn_id    VARCHAR(40),      -- the provider's request number (PAS Claim.identifier); NULL for channel L
+    rqstr_npi   VARCHAR(10),      -- ordering practitioner's NPI, as received; NULL for channel L
     upd_ts      TIMESTAMP
+);
+
+CREATE TABLE pa_doc (             -- documentation received with a prior authorization request (Da Vinci DTR)
+    pa_id       VARCHAR(15),
+    qnr_url     VARCHAR(120),     -- Questionnaire canonical URL, with |version
+    item_id     VARCHAR(40),      -- Questionnaire item linkId
+    ans_txt     VARCHAR(200),     -- the answer, as text (true/false for booleans)
+    ans_src     CHAR(1),          -- A auto-populated, O overridden, M manual
+    upd_ts      TIMESTAMP,
+    PRIMARY KEY (pa_id, item_id)
 );
 
 CREATE TABLE mbr_cnsnt (          -- member data-sharing choices (CMS-0057-F)

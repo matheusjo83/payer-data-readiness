@@ -77,6 +77,8 @@ Reproducibility); every link, merge and review decision stayed the same.
 | Provider Access and Payer-to-Payer APIs against gold | `make fhir-provider-api-check` (`data/fhir_provider_api.json`) | Provider Access |
 | Payer-to-Payer messages conformance (PDex) | `make fhir-validate-p2p`              | Provider Access |
 | SMART authorization of both APIs (what each client may see) | `make fhir-security-check` (`data/fhir_security.json`) | API security |
+| Prior authorization exchange, end to end (CRD, DTR, PAS) | `make fhir-prior-auth-check` (`data/fhir_prior_auth.json`) | Prior authorization exchange |
+| Prior authorization exchange conformance (CRD, DTR, PAS 2.1.0) | `make fhir-validate-prior-auth`       | Prior authorization exchange |
 
 ## Data quality
 
@@ -554,6 +556,60 @@ subtracted from a provider's members, the answers no longer checked, a member's 
 name another member): 7 checks failed (four of the member app's refusals, the opted-out member's
 Patient, the unattributed member's claim by ID, and the opt-out recorded during the check), and all
 73 passed again with the gateway restored.
+
+**Prior authorization exchange** (`make fhir-up fhir-publish fhir-prior-auth-check
+fhir-validate-prior-auth`, run on 2026-11-13). The new `pa_req` fields come from their own random
+generator, so the generated data kept every figure: the same 3,000 requests (483 moved into
+coverage), the same decisions and timeliness, and the 547 PDex samples, now with diagnosis, date,
+place and quantity, still validate with 0 errors and 0 warnings. The dbt build has 346 nodes
+(327 before), and its 6 warnings are the ones main has, with the same counts.
+
+The check plays two providers' EHRs through nine requests whose decisions it states itself, one
+member each, for a service date a week ahead:
+
+| Request (provider)                                  | Service | On arrival | After the review |
+|-----------------------------------------------------|---------|-----------:|-----------------:|
+| criteria met (X)                                    | 97110   | A1         | A1               |
+| 2 weeks of home exercise (X)                        | 97110   | A4         | A1               |
+| no functional goals (X)                             | 97110   | A4         | A3               |
+| 20 visits (Y)                                       | 97110   | A4         | A1               |
+| suspected pneumonia, expedited (X)                  | 71046   | A1         | A1               |
+| cough for 10 days (X)                               | 71046   | A4         | A1               |
+| chest imaging in the last 30 days (Y)               | 71046   | A4         | A3               |
+| questionnaire incomplete (X)                        | 71046   | A4         | A3               |
+| no documentation (X)                                | 97110   | A4         | A3               |
+
+91 checks, all passed, in 18 seconds:
+
+| Checks                                                                                  | Passed  |
+|-----------------------------------------------------------------------------------------|--------:|
+| CRD: discovery; 97110 and 71046 need authorization with their questionnaire, 99213 does not; a member without coverage is not covered; two orders at once; no prefetch (412), the wrong hook (400), no token (401) | 10 / 10 |
+| DTR: the package by order and by questionnaire, the items of each, an order that needs no documentation, no coverage (400) | 6 / 6 |
+| PAS `$submit`: each request's decision on arrival, the 90-day authorization period or the reason for the pend; the same request again (same answer); a service without a rule, a member without coverage, an unknown member, two items (422), another provider's Organization (403), no token (401) | 25 / 25 |
+| The UM tables: one `pa_req` row per request and none for the refusals, each with its fields as received (including the clinician's NPI), and each DTR answer in `pa_doc` with its source | 19 / 19 |
+| Subscription: active after the handshake; filtered on another NPI (403); another provider reading it (404) | 3 / 3 |
+| Review: every pended request decided; provider X notified of exactly its five pended requests, each with the reviewer's decision, and none of provider Y's; `$status` counting five events | 3 / 3 |
+| PAS `$inquire`: pended before the review, each pended request's final decision after it, a request number never sent (404) | 9 / 9 |
+| End to end: CDC sync and dbt build (61 models and tests); each request in gold (PDex) with its final decision, diagnosis, date, place, quantity and priority; the 38 DTR answers in silver; all nine within the CMS-0057-F timeframe; published, and two members' apps reading their own decisions (A1, A3) | 16 / 16 |
+
+The exchange the check saved (the CRD order, the DTR package and answers, the PAS request, the
+approved and pended responses, the inquiry and its response, the Subscription and a notification)
+validates against CRD, DTR and PAS 2.1.0 with tx.fhir.org with 0 errors and 0 warnings; 43 X12
+codes are counted as unverified (licensed code lists) and 8 warnings as known (7 MB member
+identifier types, one value set the Subscriptions backport binds to and no R4 package has).
+Validating the first prototype found four gaps, which became decisions: the clinicians and medical
+record numbers (provider data, kept in the simulated EHR), and the place of service, diagnosis and
+service date PAS requires and `pa_req` lacked. Validating the service's own answers found an
+invariant in CRD that fails whenever `doc-purpose` is present, which the service leaves out.
+
+To check that the checks can fail, the service was changed in three places (the physical therapy
+rule no longer checking the weeks of prior therapy, notifications sent to every provider's
+subscription, every DTR answer stored as auto-populated): 15 checks failed (the request that should
+be pended: approved on arrival, without a reason, its legacy row and its inquiry; the eight
+`pa_doc` checks; the review count, the notifications and their count), and all 91 passed again with
+the service restored. Running the check twice within a minute found one fault in the check itself:
+HAPI answers an identical search from its cache for a minute, so the member's search missed the
+new request; it now sends `Cache-Control: no-cache`, and two runs in a row pass.
 
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
 removed from the exported copies; the CARIN package is loaded only for its code systems): 0
