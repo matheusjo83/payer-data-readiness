@@ -666,6 +666,37 @@ the service restored. Running the check twice within a minute found one fault in
 HAPI answers an identical search from its cache for a minute, so the member's search missed the
 new request; it now sends `Cache-Control: no-cache`, and two runs in a row pass.
 
+**Robust PAS notifications** (`make fhir-up fhir-publish fhir-api-check fhir-provider-api-check
+fhir-security-check fhir-prior-auth-check fhir-validate-prior-auth`, run on 2026-11-14, servers
+recreated empty, in the order CI runs them). The subscriptions and the record of what was notified
+now live in the payer's database (schema `pas_notify`, with an outbox of deliveries) instead of the
+gateway's memory, a failed delivery is retried with backoff, and a subscription may notify only the
+endpoint its provider registered. 11 new checks, all passed, so 102 of 102 in `make
+fhir-prior-auth-check`; the other API checks are unchanged (143, 154 and 74, all passed):
+
+| Checks                                                                                  | Passed  |
+|-----------------------------------------------------------------------------------------|--------:|
+| A Subscription naming another provider's registered endpoint, or one nobody registered: 422 | 2 / 2 |
+| Provider Y's subscription created active (its endpoint then refuses every notification)  | 1 / 1   |
+| The gateway stopped while the reviewer decides and started again; the subscription still there, active (and the decisions notified: the existing review checks) | 2 / 2 |
+| Provider X: event 1 refused twice and then delivered, retried after 2.2 and 4.1 s; its five events delivered once each, in order | 3 / 3 |
+| Provider Y: after the first attempt and six retries (2, 4, 8, 16, 33 and 64 s apart), the subscription in error with both events counted, the second never attempted | 3 / 3 |
+
+The check now takes 2 minutes 15 seconds instead of 18: most of it is waiting for provider Y's
+six retries (about two minutes). It deletes its subscriptions at the end, since the payer now
+keeps them, and two runs in a row on the same database pass. `make fhir-validate-prior-auth`
+still finds 0 errors and 0 warnings in the ten messages, with the same 36 X12 codes unverified.
+
+To check that the checks can fail, the service was changed in four places (a failed delivery
+sending the subscription to error at once, as before; no check of the endpoint; every start
+treating the decisions already made as history, as before, so the ones made while it was down
+are lost; deliveries not in event order): 10 checks failed, and the lost decisions hid the other
+faults, since nothing was then sent at all. With only the retry and the order changed, 5 failed
+(event 1 not retried, its timing, events out of order and repeated, provider Y's attempts and
+their backoff). All 102 passed again with the service restored. Building it found one fault in
+the check: since the payer keeps the subscriptions, those left by earlier runs were notified too,
+so the check now counts only its own subscriptions' attempts and deletes them when it ends.
+
 **Base FHIR R4 validation** (`make fhir-validate`, 200 resources of each type, `meta.profile`
 removed from the exported copies; the CARIN package is loaded only for its code systems): 0
 errors and 0 warnings for Patient, Coverage and ExplanationOfBenefit, with 519 known warnings (the

@@ -25,6 +25,7 @@ import copy
 import hashlib
 import json
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -317,20 +318,35 @@ def subscription(npi: str, endpoint: str, content: str = "full-resource") -> dic
 
 
 class Listener:
-    """The provider's rest-hook endpoint: keeps every notification Bundle it receives."""
+    """The providers' rest-hook endpoints (one path per provider): keeps every
+    notification Bundle it accepts, and every attempt (path, time, type,
+    subscription, event number, the status it answered). fail[path] makes it refuse (503) that many
+    attempts on the path (float('inf'): all), to see the payer retry."""
 
     def __init__(self, port: int = 8094):
         self.received: list[dict] = []
+        self.attempts: list[dict] = []
+        self.fail: dict[str, float] = {}
         self.event = threading.Condition()
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                params = {p["name"]: p for p in body["entry"][0]["resource"]["parameter"]}
+                number = next((q.get("valueString") for q in params.get("notification-event", {}).get("part", [])
+                               if q["name"] == "event-number"), None)
                 with outer.event:
-                    outer.received.append(json.loads(body))
+                    refuse = outer.fail.get(self.path, 0) > 0
+                    if refuse:
+                        outer.fail[self.path] -= 1
+                    else:
+                        outer.received.append(body)
+                    outer.attempts.append({"path": self.path, "at": time.time(), "type": params["type"]["valueCode"],
+                                           "subscription": params["subscription"]["valueReference"]["reference"],
+                                           "event": number, "status": 503 if refuse else 200})
                     outer.event.notify_all()
-                self.send_response(200)
+                self.send_response(503 if refuse else 200)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 

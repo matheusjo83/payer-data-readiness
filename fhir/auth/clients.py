@@ -15,7 +15,8 @@ providers come from gold, so it runs after dbt).
                              read and search of Patient, Coverage,
                              ExplanationOfBenefit, Group and Organization; and prior
                              authorization (DTR questionnaires, PAS $submit and
-                             $inquire, PAS subscriptions).
+                             $inquire, PAS subscriptions), with the one endpoint
+                             its subscriptions may notify (notification_endpoints).
   payer-new-payer,           backend clients of other payers (Payer-to-Payer), each
   payer-other-payer          with its payer identifier: member match (system/Group.c,
                              system/Patient.s), the export of its match groups, and
@@ -30,6 +31,7 @@ Usage (from the repository root, after make dbt):
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -58,6 +60,10 @@ PROVIDER_SCOPES = ["system/Patient.rs", "system/Coverage.rs", "system/Explanatio
 PAYER_SCOPES = ["system/Group.crds", "system/Patient.rs", "system/Coverage.r", "system/ExplanationOfBenefit.r",
                 "system/Organization.r"]
 ADMIN_SCOPES = ["system/*.cruds"]
+# Each provider's endpoint for PAS notifications: its EHR's rest-hook, here the
+# simulated EHR of make fhir-prior-auth-check, on the host (one path per provider).
+ENDPOINTS_DIR = AUTH_DIR / "endpoints"
+NOTIFICATION_BASE = os.environ.get("PROVIDER_NOTIFICATION_BASE", "http://host.docker.internal:8094/notifications")
 
 
 def public_jwk(client_id: str) -> dict:
@@ -93,14 +99,24 @@ def main() -> None:
         backend("admin-provider-access", "provider-access", "admin", ADMIN_SCOPES),
         *(backend(cid, "provider-access", "payer", PAYER_SCOPES, payer_identifier=ident)
           for cid, ident in PAYERS.items()),
-        *(backend(f"provider-{p}", "provider-access", "provider", PROVIDER_SCOPES, fhirUser=f"Organization/{p}")
+        *(backend(f"provider-{p}", "provider-access", "provider", PROVIDER_SCOPES, fhirUser=f"Organization/{p}",
+                  notification_endpoints=[f"{NOTIFICATION_BASE}/{p}"])
           for p in providers),
     ]
     out = AUTH_DIR / "clients.json"
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps({"clients": clients}, indent=1))
     tmp.replace(out)
-    print(f"{len(clients)} clients ({len(providers)} providers) written to {out}; keys in {KEYS_DIR}")
+    # The registered notification endpoints, apart from the keys: the gateway reads
+    # only this directory.
+    endpoints = {c["client_id"]: c["notification_endpoints"] for c in clients if c.get("notification_endpoints")}
+    ENDPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_e = ENDPOINTS_DIR / "notification_endpoints.json"
+    tmp = out_e.with_suffix(".tmp")
+    tmp.write_text(json.dumps(endpoints, indent=1))
+    tmp.replace(out_e)
+    print(f"{len(clients)} clients ({len(providers)} providers) written to {out}; keys in {KEYS_DIR}; "
+          f"notification endpoints in {out_e}")
 
 
 if __name__ == "__main__":
