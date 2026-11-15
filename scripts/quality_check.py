@@ -124,8 +124,7 @@ def check_history(checks, con, snap):
     checks.group = "history"
     runs = {r[0]: r for r in con.execute(
         "select run_key, source, metrics_from, ci_run_id, commit from bronze._quality_runs").fetchall()}
-    files = {json.loads(f.read_text())["run_key"]
-             for f in list(qh.CI_DIR.glob("*.json")) + list(qh.LOCAL_DIR.glob("*.json"))} | {snap["run_key"]}
+    files = {r["run_key"] for r in qh.snapshot_files()} | {snap["run_key"]}
     checks.check("every snapshot collected", sorted(files), sorted(runs))
 
     count = dict(con.execute("select run_key, count(*) from bronze._quality_metrics group by run_key").fetchall())

@@ -182,6 +182,15 @@ make dashboard-up         # the dashboard of the history at http://localhost:850
 make dq-check             # check the snapshot, the history and the dashboard against their sources
 ```
 
+Scale benchmark (deletes the legacy database and the lakehouse; `make reset` and the Quickstart
+return to the base data):
+
+```bash
+make scale SCALE="1 10 30"  # the data pipeline at 1x, 10x and 30x the base volumes: time, memory, disk, Splink pairs (data/scale/)
+make dq-history dashboard-up  # the results in the history and the dashboard's Scale tab
+make scale-check          # check the results, the history and the Scale tab
+```
+
 The legacy schema gained columns in Phase 6, `pa_req.req_amt` with the FHIR API, the table
 `mbr_cnsnt` with the Provider Access API, and seven `pa_req` columns and the table `pa_doc` with
 the prior authorization exchange. A database created before any of them needs a new legacy
@@ -218,7 +227,10 @@ the Payer-to-Payer messages, or against CRD, DTR or PAS in the prior authorizati
 of a FHIR API against gold, of its authorization or of the prior authorization exchange fails, or if the incremental
 current state differs from a full rebuild or from Postgres, or if the data quality history or its
 dashboard differs from their sources. Each run uploads its quality snapshot as an artifact, which the
-next runs collect into the history.
+next runs collect into the history. The scale benchmark has its own workflow
+([`.github/workflows/scale.yml`](.github/workflows/scale.yml)), run by hand and on pull requests
+that change it: `make synthea scale dq-history dashboard-up scale-check`, one scale factor after
+the other on the same runner; the main CI collects its snapshots into the history.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -277,14 +289,14 @@ Backlog (not started), in the order planned:
 
 ```
 legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
-scripts/       Synthea download and configuration, PBM feed generator, simulated identity reviewer, dbt coverage report, data quality history and its check
+scripts/       Synthea download and configuration, PBM feed generator, simulated identity reviewer, dbt coverage report, data quality history, the scale benchmark and their checks
 ingestion/     Lakehouse connection (DuckLake) and bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
 dbt/           Silver and gold models (including the Splink Python models), seeds (with the review decisions), tests, lineage
 airflow/       Airflow image and DAGs
 dashboard/     Data quality history dashboard (Streamlit image)
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base, CARIN, PDex), FHIR server publish, the PDex gateway and API checks
 docs/          Technical write-up, migration checklist, architecture details and results
-.github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request)
+.github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request) and the scale benchmark workflow
 ```
 
 ## Author

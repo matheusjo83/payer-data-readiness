@@ -1,6 +1,6 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-prior-auth fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check fhir-prior-auth-check pa-review dq-snapshot dq-history dq-check dashboard-up docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-prior-auth fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check fhir-prior-auth-check pa-review dq-snapshot dq-history dq-check dashboard-up scale scale-check docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
 	docker compose up -d --build --wait legacy-db lakehouse-catalog
@@ -135,6 +135,13 @@ dashboard-up: ## Start the data quality history dashboard at http://localhost:85
 
 dq-check: ## Check the quality snapshot, the history and the dashboard against their sources (writes data/quality_check.json)
 	$(PY) scripts/quality_check.py
+
+SCALE ?= 1 10 30
+scale:     ## Scale benchmark of the data pipeline at SCALE times the base volumes (default 1 10 30; deletes the legacy database and the lakehouse, after make synthea; writes data/scale/)
+	$(PY) scripts/scale_benchmark.py $(SCALE)
+
+scale-check: ## Check the scale benchmark's results, their place in the quality history and the dashboard's Scale tab (after scale, dq-history, dashboard-up; writes data/scale/check.json)
+	$(PY) scripts/scale_check.py
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

@@ -647,7 +647,7 @@ accumulated from one run to the next. `scripts/quality_history.py` keeps them.
   `cdc`, `fhir`, `linkage`, `data_quality`, `tests`, `performance` and `volume`; the dimension
   says what a metric is of (a source, a table, a method, an implementation guide), empty for a
   total. A local run keeps a copy in `data/quality_history/local/`. The scenario (`DQ_SCENARIO`,
-  `base` by default) is how the scale benchmark will mark its runs.
+  `base` by default) is how the scale benchmark marks its runs (`1x`, `10x`, `30x`).
 - **Store.** CI uploads the snapshot as the `quality-snapshot` artifact, so the history needs no
   database that outlives a runner and no commit from CI. The cost is GitHub's retention of
   artifacts (90 days); the releases keep their reports as assets.
@@ -663,7 +663,7 @@ accumulated from one run to the next. `scripts/quality_history.py` keeps them.
 - **Models.** `gold.quality_runs` has one row per run, with its volume and its position in its
   series; `gold.quality_history` every metric of every run, with the value the same metric had in
   the previous run of its series. A series is a source, a branch and a scenario: the CI runs of
-  main are one, a pull request's run starts its own, and each scale of the benchmark will be
+  main are one, a pull request's run starts its own, and each scale of the benchmark is
   another.
 - **Dashboard** (`make dashboard-up`, http://localhost:8501). A Streamlit app in its own image
   (`dashboard/`), in the `dashboard` compose profile, which attaches the lakehouse read-only (the
@@ -678,3 +678,72 @@ accumulated from one run to the next. `scripts/quality_history.py` keeps them.
   rebuilt run against its reports artifact downloaded again; gold's previous values against the
   two latest runs of main ordered from bronze; and the dashboard, run headless in its container
   (Streamlit's AppTest), against gold's headline numbers for main's latest run and this run's.
+
+## Scale benchmark
+
+`scripts/scale_benchmark.py` (`make scale SCALE="1 10 30"`, and the `Scale benchmark` workflow)
+runs the data pipeline at the base volumes and at multiples of them, to see what grows with the
+volume and how fast.
+
+- **What scales.** The legacy generator gets the factor times its default members, providers,
+  claims and prior authorizations (5,000, 300, 25,000 and 3,000); the injected issue rates stay
+  the same, so the expected counts scale with them. The PBM feed and its ground truth follow the
+  members (the generator takes 60% of the covered ones). Synthea stays at its base population and
+  the FHIR APIs and validation are not run: they measure conformance, not volume, and the FHIR
+  models still build on the scaled legacy data.
+- **One environment per factor.** Each factor starts from an empty legacy database and lakehouse
+  (their containers, volumes and Parquet files are removed), one factor after the other on the
+  same machine, so the factors compare with each other.
+- **Steps.** Generation (legacy, PBM), the CDC initial load (replication slot and snapshot into
+  DuckLake), the PBM, FHIR and terminology loads, the full dbt build, the Splink blocking
+  analysis, a change batch (one simulated event per 100 members, claims and prior
+  authorizations, about 1% of those rows), the incremental CDC sync, the incremental current state
+  (`make cdc-check`'s selection), the full rebuild after the changes and the reconciliation with
+  Postgres.
+- **Resources.** Each step's time, and its peak memory from `wait4`: the kernel's maximum resident
+  set of the step's process and every descendant it waited for (dbt's Python models, Splink
+  among them, run inside dbt's process). `docker stats` samples the two Postgres containers about
+  every two seconds, so steps shorter than that may have no sample. After the steps, the sizes:
+  the Parquet files, the catalog database, the legacy database and its WAL, the PBM files.
+- **Memory.** dbt runs with a profile of its own (`data/scale/profiles/`): the project's profile
+  plus a DuckDB memory limit, 70% of the machine's memory by default (`--memory-limit`), a spill
+  directory (`data/scale/tmp/`), `preserve_insertion_order: false` and 4 DuckDB threads
+  (`--duckdb-threads`, the GitHub runner's cores; DuckDB's default is one per core, and each
+  thread writing Parquet holds a row group: with 20, a model over the 30x EOB JSON ran out of
+  memory on its own, with 4 it peaked at 5 GB), as connection config (`config_options`: set once, as DuckDB
+  refuses another spill directory after it has spilled, and dbt-duckdb applies `settings` on every
+  cursor). With DuckDB's default
+  limit, 80%, the build used 10 GB at 10x on a 16 GB machine, and at 30x it took the machine down
+  (the EOB models, `terminology_code_check` and the ViewDefinition tables, building in parallel).
+  A watchdog checks the memory still available every half second and stops the step, and the
+  benchmark, under 8% of the machine's memory (at least 1 GB): the benchmark then fails with a
+  message instead of taking the machine down. Each step records the lowest available memory it saw.
+- **EOB in batches.** `gold.fhir_explanation_of_benefit` gathers each claim's lines into JSON
+  lists, which DuckDB keeps in memory: at 30x (750,000 claims, 1.9 million lines) one statement
+  needed more than the 10.3 GB limit, even alone on one thread. The model is built in batches
+  (`macros/fhir_explanation_of_benefit.sql`): a claim's batch is the hash of its id, one batch per
+  200,000 claim lines (`fhir_eob_batch_lines`), the first one by the model and the others by its
+  post-hook. A claim and its lines are always in the same batch, so the result does not depend on
+  the number of batches (the same checksum at 30x with 4 and with 10). The base data is one batch,
+  with the same SQL as before.
+- **Splink.** The candidate pairs each blocking rule adds to the rules before it, for the linkage
+  and the PBM dedupe, counted exactly with Splink's blocking analysis on `gold.identity_people` (the
+  rules are read from the two models, `BLOCKING_RULES`), the possible pairs, and the pairs the
+  model kept (probability 0.01 or more). Precision and recall come from
+  `gold.identity_match_quality` as in every run. The reviewer decisions
+  (`identity_review_decisions`) are turned off at every factor, the base one included
+  (`identity_apply_review_decisions: false`): they name cardholders and members of the base data,
+  who are other people at another volume. So the benchmark measures the model's own decisions,
+  and `splink_reviewed` is left out of its snapshots.
+- **History.** Each factor's quality snapshot is taken from the lakehouse it built, with this
+  run's dbt results and reconciliation and the benchmark's metrics (area `scale`), as scenario
+  `1x`, `10x` or `30x`; the run key ends with the scenario. The workflow uploads `data/scale/`
+  as the `scale-results` artifact, and the collector reads every run of the workflow (any branch:
+  the branch is part of the series), so the main CI adds them to `gold.quality_history`. The
+  dashboard's Scale tab shows a benchmark's latest run of each factor side by side.
+- **Check** (`make scale-check`, `scripts/scale_check.py`). Per factor: every step finished, the
+  legacy tables at the factor's volumes (claims and prior authorizations within the change batch),
+  the PBM feed scaled with the members, Splink's inputs equal to the members and cardholders, the
+  candidate pairs adding up and bounded by the possible pairs, the pairs kept bounded by the
+  candidates, the current state equal to Postgres, no dbt test failing. Then every snapshot in the
+  history and the Scale tab (AppTest) showing each factor's values.

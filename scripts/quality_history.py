@@ -14,16 +14,19 @@ and the history of those snapshots in the lakehouse.
                  artifact, or, for runs from before it, the metrics their reports
                  artifact holds (the reports only; the lakehouse of those runs is
                  gone, so their load, CDC latency and linkage metrics are missing);
+               - the runs of the scale benchmark workflow (scale.yml): one
+                 snapshot per scale factor, in their scale-results artifact;
                - the local copies under data/quality_history/local/;
-               - this run's data/quality_snapshot.json (a CI run is still going
-                 when it collects, so GitHub has no artifact of it yet).
+               - this run's data/quality_snapshot.json and the scale snapshots
+                 in data/scale/ (a CI run is still going when it collects, so
+                 GitHub has no artifact of it yet).
                Downloaded snapshots are kept under data/quality_history/ci/ and
                not downloaded again. Without a GitHub token, only those, the
                local copies and this run's are collected.
 
 A snapshot is one run: when, which commit, which scenario (DQ_SCENARIO, `base`
-by default: the generators' default volumes), and a list of metrics, each one
-(area, metric, dimension, value). The areas:
+by default: the generators' default volumes; the scale benchmark's are 1x, 10x,
+30x), and a list of metrics, each one (area, metric, dimension, value). The areas:
 
     load          bronze load steps (gold.load_reliability)
     cdc           CDC latency, the replication slot, reconciliation with Postgres
@@ -34,6 +37,8 @@ by default: the generators' default volumes), and a list of metrics, each one
     tests         dbt build results
     performance   durations: dbt build, bulk exports, the CI run
     volume        rows in the lakehouse, resources published
+    scale         the scale benchmark: time, memory and disk per step, Splink
+                  candidate pairs per blocking rule (scripts/scale_benchmark.py)
 
 The GitHub token comes from GITHUB_TOKEN or GH_TOKEN, or `gh auth token`; the
 repository from GITHUB_REPOSITORY or the origin remote.
@@ -60,9 +65,12 @@ SNAPSHOT = DATA / "quality_snapshot.json"
 HISTORY = DATA / "quality_history"
 LOCAL_DIR = HISTORY / "local"
 CI_DIR = HISTORY / "ci"
+SCALE_DIR = DATA / "scale"
 WORKFLOW = "ci.yml"
+SCALE_WORKFLOW = "scale.yml"
 SNAPSHOT_ARTIFACT = "quality-snapshot"
 REPORTS_ARTIFACT = "reports"
+SCALE_ARTIFACT = "scale-results"
 API = "https://api.github.com"
 
 # HL7 validator summaries, by the directory the run writes them to. The first
@@ -280,21 +288,20 @@ def git(*args) -> str | None:
         return None
 
 
-def snapshot() -> dict:
-    import lakehouse
+def make_record(metrics: list[dict], scenario: str | None = None, key_suffix: str = "") -> dict:
+    """A snapshot of this run: its metrics and where they come from (the CI run,
+    or this machine's branch and commit)."""
     now = datetime.now(timezone.utc)
     in_ci = os.environ.get("GITHUB_ACTIONS") == "true"
     run_id = os.environ.get("GITHUB_RUN_ID") if in_ci else None
-    con = lakehouse.connect(read_only=True)
-    metrics = from_reports(read_dir(ROOT)) + from_lakehouse(con)
-    record = {
-        "run_key": f"ci-{run_id}" if run_id else f"local-{now:%Y%m%dT%H%M%SZ}",
+    return {
+        "run_key": (f"ci-{run_id}" if run_id else f"local-{now:%Y%m%dT%H%M%SZ}") + key_suffix,
         "run_at": now.isoformat(timespec="seconds"),
         # In a pull request, the checkout is the merge of the branch into main.
         "commit": os.environ.get("DQ_COMMIT") or git("rev-parse", "HEAD"),
         "branch": (os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME")) if in_ci
                   else git("rev-parse", "--abbrev-ref", "HEAD"),
-        "scenario": os.environ.get("DQ_SCENARIO", "base"),
+        "scenario": scenario or os.environ.get("DQ_SCENARIO", "base"),
         "source": "ci" if in_ci else "local",
         "ci_run_id": int(run_id) if run_id else None,
         "ci_event": os.environ.get("GITHUB_EVENT_NAME") if in_ci else None,
@@ -303,12 +310,25 @@ def snapshot() -> dict:
         "metrics_from": "snapshot",
         "metrics": metrics,
     }
-    SNAPSHOT.write_text(json.dumps(record, indent=2) + "\n")
-    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
-    if not in_ci:
-        (LOCAL_DIR / f"{record['run_key']}.json").write_text(json.dumps(record, indent=2) + "\n")
-    areas = sorted({m["area"] for m in metrics})
-    print(f"{record['run_key']}: {len(metrics)} metrics ({', '.join(areas)}) -> {SNAPSHOT.relative_to(ROOT)}")
+
+
+def write_snapshot(record: dict, path: Path) -> None:
+    """Writes the snapshot, and outside CI a copy under data/quality_history/local/."""
+    text = json.dumps(record, indent=2) + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    if record["source"] == "local":
+        LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+        (LOCAL_DIR / f"{record['run_key']}.json").write_text(text)
+    areas = sorted({m["area"] for m in record["metrics"]})
+    print(f"{record['run_key']}: {len(record['metrics'])} metrics ({', '.join(areas)}) -> {path.relative_to(ROOT)}")
+
+
+def snapshot() -> dict:
+    import lakehouse
+    con = lakehouse.connect(read_only=True)
+    record = make_record(from_reports(read_dir(ROOT)) + from_lakehouse(con))
+    write_snapshot(record, SNAPSHOT)
     return record
 
 
@@ -368,25 +388,40 @@ class GitHub:
         with urllib.request.urlopen(location, timeout=120) as blob:
             return blob.read()
 
-    def main_runs(self) -> list[dict]:
+    def runs(self, workflow: str, query: str = "") -> list[dict]:
+        """The finished runs of a workflow; none if GitHub does not know it yet."""
         runs, page = [], 1
         while True:
-            batch = self.json(f"actions/workflows/{WORKFLOW}/runs?branch=main&event=push"
-                              f"&status=completed&per_page=100&page={page}")["workflow_runs"]
+            try:
+                batch = self.json(f"actions/workflows/{workflow}/runs?status=completed{query}"
+                                  f"&per_page=100&page={page}")["workflow_runs"]
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return runs
+                raise
             runs += batch
             if len(batch) < 100:
                 return runs
             page += 1
 
+    def main_runs(self) -> list[dict]:
+        return self.runs(WORKFLOW, "&branch=main&event=push")
 
-def ci_record(gh: GitHub, run: dict) -> dict | None:
-    """The snapshot of a finished CI run of main: its quality-snapshot artifact,
-    or one made from its reports artifact."""
-    artifacts = {a["name"]: a for a in gh.json(f"actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
-                 if not a["expired"]}
+    def scale_runs(self) -> list[dict]:
+        """Every run of the scale benchmark, on any branch: they are few, and the
+        branch is part of each series."""
+        return self.runs(SCALE_WORKFLOW)
+
+
+def artifacts(gh: GitHub, run: dict) -> dict:
+    return {a["name"]: a for a in gh.json(f"actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
+            if not a["expired"]}
+
+
+def run_meta(run: dict) -> dict:
     started = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
     ended = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
-    meta = {
+    return {
         "run_key": f"ci-{run['id']}",
         "commit": run["head_sha"],
         "branch": run["head_branch"],
@@ -396,17 +431,57 @@ def ci_record(gh: GitHub, run: dict) -> dict | None:
         "conclusion": run["conclusion"],
         "duration_seconds": (ended - started).total_seconds(),
     }
-    if SNAPSHOT_ARTIFACT in artifacts:
-        read = read_zip(gh.download(artifacts[SNAPSHOT_ARTIFACT]["id"]))
+
+
+def ci_record(gh: GitHub, run: dict) -> dict | None:
+    """The snapshot of a finished CI run of main: its quality-snapshot artifact,
+    or one made from its reports artifact."""
+    found = artifacts(gh, run)
+    meta = run_meta(run)
+    started = datetime.fromisoformat(run["run_started_at"].replace("Z", "+00:00"))
+    if SNAPSHOT_ARTIFACT in found:
+        read = read_zip(gh.download(found[SNAPSHOT_ARTIFACT]["id"]))
         record = read("data/quality_snapshot.json") or read("quality_snapshot.json")
         if record:
             record.update(meta)
             return record
-    if REPORTS_ARTIFACT not in artifacts:
+    if REPORTS_ARTIFACT not in found:
         return None
-    metrics = from_reports(read_zip(gh.download(artifacts[REPORTS_ARTIFACT]["id"])))
+    metrics = from_reports(read_zip(gh.download(found[REPORTS_ARTIFACT]["id"])))
     return {**meta, "run_at": started.isoformat(timespec="seconds"), "scenario": "base",
             "metrics_from": "reports", "metrics": metrics}
+
+
+def scale_records(gh: GitHub, run: dict) -> list[dict]:
+    """The snapshots of a run of the scale benchmark, one per scale factor (the
+    scale factors it finished, if it failed on a later one)."""
+    found = artifacts(gh, run)
+    if SCALE_ARTIFACT not in found:
+        return []
+    z = zipfile.ZipFile(io.BytesIO(gh.download(found[SCALE_ARTIFACT]["id"])))
+    records = []
+    for name in sorted(z.namelist()):
+        if re.fullmatch(r"(?:.*/)?quality_snapshot_[^/]+\.json", name):
+            record = json.loads(z.read(name))
+            meta = run_meta(run)
+            meta["run_key"] = f"ci-{run['id']}-{record['scenario']}"
+            record.update(meta)
+            records.append(record)
+    return records
+
+
+def snapshot_files() -> list[dict]:
+    """Every snapshot on disk: the downloaded CI runs (a scale run's file holds a
+    list, one per scale factor), the local copies, this run's and the scale
+    benchmark's."""
+    records = []
+    files = sorted(CI_DIR.glob("*.json")) + sorted(LOCAL_DIR.glob("*.json")) + sorted(SCALE_DIR.glob("quality_snapshot_*.json"))
+    if SNAPSHOT.is_file():
+        files.append(SNAPSHOT)
+    for f in files:
+        content = json.loads(f.read_text())
+        records += content if isinstance(content, list) else [content]
+    return records
 
 
 # --- Collect -------------------------------------------------------------------
@@ -434,15 +509,22 @@ def collect(offline: bool = False) -> list[dict]:
                 cached.write_text(json.dumps(record, indent=2) + "\n")
                 new += 1
         print(f"GitHub {repo}: {len(runs)} finished CI runs of main, {new} downloaded now")
+        scale_runs, new = gh.scale_runs(), 0
+        for run in scale_runs:
+            cached = CI_DIR / f"scale-{run['id']}.json"
+            if cached.is_file():
+                continue
+            found = scale_records(gh, run)
+            if found:
+                cached.write_text(json.dumps(found, indent=2) + "\n")
+                new += 1
+        print(f"GitHub {repo}: {len(scale_runs)} finished scale benchmark runs, {new} downloaded now")
     else:
         print("No GitHub token or repository: collecting the snapshots already downloaded")
 
-    for f in sorted(CI_DIR.glob("*.json")) + sorted(LOCAL_DIR.glob("*.json")):
-        r = json.loads(f.read_text())
+    # Later files win: this run's snapshots over copies of them.
+    for r in snapshot_files():
         records[r["run_key"]] = r
-    if SNAPSHOT.is_file():
-        current = json.loads(SNAPSHOT.read_text())
-        records[current["run_key"]] = current
 
     con = common.connect()
     con.execute("BEGIN")

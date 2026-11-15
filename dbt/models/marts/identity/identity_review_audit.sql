@@ -6,7 +6,7 @@
 -- changes, a decision on a case the model no longer proposes is stale and has no
 -- effect.
 with decisions as (
-    select * from {{ ref('identity_review_decisions') }}
+    select * from {{ identity_review_decisions() }}
 ),
 
 member_cases as (

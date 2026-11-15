@@ -31,6 +31,16 @@ FIRST_NAME = cl.CustomComparison(
 )
 
 
+# Candidate pairs: a pair is scored when it meets any of these rules (also read
+# by scripts/scale_benchmark.py, which counts the pairs each rule adds).
+BLOCKING_RULES = [
+    block_on("birth_date"),
+    block_on("first_name_canonical", "last_name"),
+    block_on("last_name", "zip_code"),
+    block_on("first_name_canonical", "zip_code"),
+]
+
+
 def model(dbt, session):
     dbt.config(materialized="table")
     people = dbt.ref("identity_people").to_arrow_table()
@@ -61,12 +71,7 @@ def model(dbt, session):
             cl.ExactMatch("gender"),
             cl.ExactMatch("zip_code"),
         ],
-        blocking_rules_to_generate_predictions=[
-            block_on("birth_date"),
-            block_on("first_name_canonical", "last_name"),
-            block_on("last_name", "zip_code"),
-            block_on("first_name_canonical", "zip_code"),
-        ],
+        blocking_rules_to_generate_predictions=BLOCKING_RULES,
         retain_intermediate_calculation_columns=False,
     )
     linker = Linker(inputs, settings, log_level="WARNING")
