@@ -250,12 +250,9 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Prior authorization exchange:** Da Vinci CRD, DTR and PAS 2.1.0 on the payer side, from the provider's order to the payer's decision, written to the legacy source and seen by the member
 - [x] **Payer-to-Payer consent at export:** each member's consent period kept on the match group and checked again when `$davinci-data-export` runs, and a revocation (the new payer deleting its match group), with checks for a consent that ends or is revoked between the member match and the export
 - [x] **Export file expiry:** the `Expires` the export status announces fixed when the job ends and enforced on the status and the files, expired jobs and files removed, HAPI's own copies deleted once read, a restart that leaves no file, and at most two running exports per client
+- [x] **Robust PAS notifications:** subscriptions and the record of what was notified kept in the payer's database (an outbox), so a restart forgets nothing; failed deliveries retried with backoff, then the subscription in error; and only the rest-hook endpoints each provider registered
 
 Backlog (not started), in the order planned:
-
-*API hardening*
-
-- [ ] **Robust PAS notifications:** persist subscriptions and the record of what was notified (so a restart forgets nothing), retry failed deliveries with backoff, and restrict the rest-hook endpoints a subscription may use
 
 *Operations and scale*
 

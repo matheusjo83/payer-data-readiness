@@ -527,6 +527,22 @@ and two services that need authorization.
   in the gateway watches `pa_req` and, when a pended PAS request is decided (by the reviewer, or by
   the activity simulator), notifies the subscriptions of the request's provider with the PAS
   response Bundle. `$status` counts the events.
+- **Notifications that survive.** The subscriptions and the record of what was notified are kept in
+  the payer's database, in a schema of their own (`pas_notify`), which CDC never reads (it captures
+  only the listed tables of `public`). Each decision on a PAS request is an event once
+  (`pas_notify.decided`; a request approved in the `$submit` answer is recorded there in the same
+  transaction, so it is never notified). Each event of an active subscription becomes a delivery,
+  an outbox row with its status, attempts and next attempt, written in the same transaction as the
+  event. A restart therefore forgets nothing: the subscriptions are there, pending deliveries
+  resume, and a decision made while the gateway was down is notified when it is back. Deliveries go
+  out in event order per subscription. A failed one is retried six times, after 2, 4, 8, 16, 32 and
+  64 seconds; if the last retry fails too, the delivery is failed and the subscription goes to
+  `error`, as the backport says, and it still counts the events that follow but is sent nothing.
+- **Registered endpoints.** A subscription may notify only an endpoint its provider registered with
+  the authorization server, like a redirect URI (`notification_endpoints`, one per provider here);
+  any other is refused (422), so a provider cannot make the payer post to an arbitrary address.
+  `fhir/auth/clients.py` writes the endpoints to their own file, which is all the gateway mounts
+  (not the clients' keys).
 - **To the member.** The request is in the legacy source like any other, so CDC carries it to
   bronze, dbt to `gold.fhir_prior_authorization` (PDex, with its diagnosis, date, place and
   quantity) and `gold.fct_prior_auth_timeliness`, and the publish to the Patient Access API, where
@@ -537,7 +553,9 @@ and two services that need authorization.
   NUCC taxonomy code (release 26.1, the one tx.fhir.org has).
 - **Check.** `fhir/prior_auth_check.py` (`make fhir-prior-auth-check`) plays two providers' EHRs
   through nine scenarios whose decisions it states itself, and checks CRD, DTR, `$submit` and its
-  refusals, the legacy rows, the Subscription, the review and its notifications, `$inquire`, and
+  refusals, the legacy rows, the Subscription, the review and its notifications (with the gateway
+  stopped while the reviewer decides, an endpoint that refuses twice, another that refuses
+  everything until the subscription is in error, and endpoints nobody registered), `$inquire`, and
   the end: a CDC sync, a dbt build of the prior authorization models, gold, the publish and each
   member's app. It writes one exchange to `data/fhir_prior_auth/messages/` for `make
   fhir-validate-prior-auth`.
@@ -551,8 +569,9 @@ and two services that need authorization.
   the X12 requirement); one service per request; no claim updates or cancellations
   (`profile-claim-update`), no attachments beyond the questionnaire, no CQL; CDS Hooks calls are
   authorized with the provider's SMART access token, not with the CDS Hooks JWT, and the service
-  takes everything from the prefetch; the subscriptions and the record of what was notified live
-  in memory (a restart forgets them); and the rules and the reviewer are a demonstration of the
+  takes everything from the prefetch; there is no `$events` operation, so a provider whose
+  subscription went to `error` learns how many events it missed from `$status` but must ask
+  `$inquire` for each; and the rules and the reviewer are a demonstration of the
   flow, not a medical policy.
 
 ## The PBM feed and identity resolution

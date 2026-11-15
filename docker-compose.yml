@@ -141,12 +141,15 @@ services:
       AUTH_PUBLIC_URL: http://localhost:8093
       # Prior authorization (Da Vinci PAS) writes requests to the payer's UM system.
       LEGACY_PG_DSN: host=legacy-db port=5432 dbname=payer_legacy user=legacy password=legacy
+      # A Subscription may notify only an endpoint its provider registered (fhir/auth/clients.py).
+      NOTIFICATION_ENDPOINTS_FILE: /opt/auth-endpoints/notification_endpoints.json
       PYTHONUNBUFFERED: "1"
     # Subscription notifications go to the providers' endpoints; the checks listen on the host.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./fhir/gateway:/opt/gateway:ro
+      - ./data/fhir_auth/endpoints:/opt/auth-endpoints:ro
     command: ["python", "-I", "/opt/gateway/gateway.py", "--port", "8080"]
     ports:
       - "8092:8080"

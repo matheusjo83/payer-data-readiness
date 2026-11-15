@@ -27,6 +27,16 @@ SCENARIOS, not taken from the service:
   subscription   a PAS Subscription of provider X: created active after a
                  handshake; one filtered on another NPI refused; invisible to
                  another provider;
+  notifications  a Subscription naming another provider's registered endpoint,
+                 or one nobody registered, refused (422); the reviewer decides
+                 while the gateway is stopped, and after it starts again the
+                 subscription is still there and the decisions are notified;
+                 provider X's endpoint refuses the first two attempts, which are
+                 retried after about 2 and 4 s, and each event is delivered once,
+                 in order; provider Y's endpoint refuses everything: its first
+                 event is retried six times (2, 4, 8, 16, 32, 64 s), then the
+                 subscription is in error with both events counted and the second
+                 never attempted;
   review         the simulated reviewer (fhir/prior_auth_review.py) decides the
                  pended requests: provider X is notified of exactly its pended
                  requests, each with the reviewer's decision; $status counts them;
@@ -46,9 +56,10 @@ data/fhir_prior_auth.json and exits with status 1 if any check fails.
 
 Every call carries a SMART access token: each provider's backend client
 (provider-<id>), the Patient Access admin client for the publish, and each
-member's own login for the last step. The provider's endpoint for notifications
-listens on the host (port 8094), which the gateway reaches as
-host.docker.internal.
+member's own login for the last step. The providers' endpoints for
+notifications listen on the host (port 8094, one path per provider, as each
+provider registered it), which the gateway reaches as host.docker.internal. The
+check stops and starts the gateway's container (docker) during the review.
 
 Usage (from the repository root, after make fhir-publish):
     python fhir/prior_auth_check.py [--base http://localhost:8092/fhir]
@@ -61,6 +72,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -82,7 +94,23 @@ PATIENT_ACCESS = os.environ.get("FHIR_SERVER_URL", "http://localhost:8090/fhir")
 LEGACY_PG_DSN = os.environ.get(
     "LEGACY_PG_DSN", "host=localhost port=5433 dbname=payer_legacy user=legacy password=legacy")
 LISTEN_PORT = int(os.environ.get("PRIOR_AUTH_LISTEN_PORT", "8094"))
-ENDPOINT = os.environ.get("PRIOR_AUTH_ENDPOINT", f"http://host.docker.internal:{LISTEN_PORT}/notifications")
+# Each provider's registered notification endpoint (fhir/auth/clients.py): <base>/<provider id>.
+NOTIFY_BASE = os.environ.get("PROVIDER_NOTIFICATION_BASE", f"http://host.docker.internal:{LISTEN_PORT}/notifications")
+GATEWAY_CONTAINER = "payer-fhir-gateway"
+RETRY_DELAYS = [2, 4, 8, 16, 32, 64]  # the gateway's default backoff, seconds
+
+
+def status_param(bundle: dict, name: str) -> str | None:
+    return next((p.get("valueString") or p.get("valueCode") for e in bundle.get("entry", [])
+                 for p in e["resource"]["parameter"] if p["name"] == name), None)
+
+
+def endpoint(provider_id: str) -> str:
+    return f"{NOTIFY_BASE}/{provider_id}"
+
+
+def path_of(url: str) -> str:
+    return urllib.parse.urlsplit(url).path
 SCOPE = "system/Patient.rs system/Organization.rs system/Questionnaire.r system/Claim.cr system/Subscription.crd"
 EHR_BASE = "https://ehr.example/fhir"
 SITE = "https://payer-data-readiness.example/"
@@ -131,6 +159,18 @@ class Http:
     def __init__(self, base: str):
         self.base = base.rstrip("/")
         self.root = self.base.removesuffix("/fhir")
+
+    def wait_up(self, seconds: float = 90) -> bool:
+        """Whether the gateway answers metadata within the time given."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            try:
+                if self.call("GET", "/metadata")[0] == 200:
+                    return True
+            except (urllib.error.URLError, ConnectionError, OSError):
+                pass
+            time.sleep(1)
+        return False
 
     def call(self, method: str, path: str, body=None, client: BackendClient | None = None, token: str | None = None,
              root: bool = False):
@@ -356,6 +396,8 @@ def main() -> None:
     run = f"R{int(time.time())}"
     checks = Checks()
     listener = ehr.Listener(LISTEN_PORT)
+    report_extra = {}
+    sub, sub_y, X, Y = {}, {}, None, None
     gold = Gold()
     try:
         chosen = pick(gold, today)
@@ -373,7 +415,7 @@ def main() -> None:
         # --- Subscription of provider X -------------------------------------------------
         sub = {}
         for _ in range(20):  # the listener's port can take a moment to be reachable (Docker Desktop)
-            status, sub = http.call("POST", "/Subscription", ehr.subscription(X.npi, ENDPOINT), X.client)
+            status, sub = http.call("POST", "/Subscription", ehr.subscription(X.npi, endpoint(X.id)), X.client)
             if status != 201 or sub.get("status") == "active":
                 break
             http.call("DELETE", f"/Subscription/{sub['id']}", client=X.client)
@@ -383,9 +425,19 @@ def main() -> None:
                                                  for p in b["entry"][0]["resource"]["parameter"]), 10)
         checks.add("subscription", "created and active after a handshake", [201, "active", True],
                    [status, sub.get("status"), len(handshakes) >= 1])
-        bad = ehr.subscription(prov["Y"].npi, ENDPOINT)
+        bad = ehr.subscription(prov["Y"].npi, endpoint(X.id))
         status, _ = http.call("POST", "/Subscription", bad, X.client)
         checks.add("subscription", "filtered on another provider's NPI -> 403", 403, status)
+        for label, url in (("another provider's registered endpoint", endpoint(prov["Y"].id)),
+                           ("an endpoint no provider registered", "http://unregistered.example/hook")):
+            status, _ = http.call("POST", "/Subscription", ehr.subscription(X.npi, url), X.client)
+            checks.add("notifications", f"endpoint: {label} -> 422", 422, status)
+        # Provider Y's endpoint accepts the handshake, then refuses every notification.
+        Y = prov["Y"]
+        status, sub_y = http.call("POST", "/Subscription", ehr.subscription(Y.npi, endpoint(Y.id)), Y.client)
+        listener.fail[path_of(endpoint(Y.id))] = float("inf")
+        checks.add("notifications", "provider Y's subscription created active", [201, "active"],
+                   [status, sub_y.get("status")])
         status, _ = http.call("GET", f"/Subscription/{sub.get('id')}", client=prov["Y"].client)
         checks.add("subscription", "another provider reading it -> 404", 404, status)
 
@@ -494,7 +546,18 @@ def main() -> None:
 
         # --- the review and the notifications ----------------------------------------------
         pended = [sent[s[0]]["pa_id"] for s in SCENARIOS if s[7] == "A4"]
+        # The reviewer decides while the gateway is down: the decisions must be
+        # notified when it is back, and X's endpoint refuses the first two attempts.
+        listener.fail[path_of(endpoint(X.id))] = 2
+        stopped = subprocess.run(["docker", "stop", GATEWAY_CONTAINER], capture_output=True, text=True).returncode
         out = subprocess.run([sys.executable, "fhir/prior_auth_review.py", *pended], capture_output=True, text=True)
+        started = subprocess.run(["docker", "start", GATEWAY_CONTAINER], capture_output=True, text=True).returncode
+        up = http.wait_up()
+        checks.add("notifications", "the gateway stopped during the review and started again", [0, 0, True],
+                   [stopped, started, up])
+        status, again = http.call("GET", f"/Subscription/{sub.get('id')}", client=X.client)
+        checks.add("notifications", "after the restart: the subscription is still there, active", [200, "active"],
+                   [status, again.get("status")])
         checks.add("review", "the reviewer decides every pended request", [0, len(pended)],
                    [out.returncode, int(out.stdout.split()[1]) if out.returncode == 0 else None])
         x_pended = {sent[s[0]]["pa_id"]: s[8] for s in SCENARIOS if s[7] == "A4" and s[1] == "X"}
@@ -502,7 +565,7 @@ def main() -> None:
         def events(b):
             return any(p.get("valueCode") == "event-notification" for p in b["entry"][0]["resource"]["parameter"])
 
-        deadline = time.time() + 30
+        deadline = time.time() + 60
         while time.time() < deadline and len(listener.wait(events, 2)) < len(x_pended):
             pass
         time.sleep(3)  # anything more would be a notification that should not have come
@@ -518,6 +581,17 @@ def main() -> None:
         count = next((p.get("valueString") for e in st.get("entry", [])
                       for p in e["resource"]["parameter"] if p["name"] == "events-since-subscription-start"), None)
         checks.add("review", "$status counts the events", [200, str(len(x_pended))], [status, count])
+        x_tries = [a for a in listener.attempts if a["subscription"].endswith(f"/Subscription/{sub.get('id')}")
+                   and a["type"] == "event-notification"]
+        first = [a for a in x_tries if a["event"] == "1"]
+        checks.add("notifications", "provider X: event 1 refused twice, then delivered", [503, 503, 200],
+                   [a["status"] for a in first])
+        gaps = [round(b["at"] - a["at"], 1) for a, b in zip(first, first[1:])]
+        checks.add("notifications", "provider X: retried after about 2 s, then 4 s", True,
+                   len(gaps) == 2 and 1.5 <= gaps[0] <= 4 and 3.5 <= gaps[1] <= 7)
+        delivered = [a["event"] for a in x_tries if a["status"] == 200]
+        checks.add("notifications", "provider X: each event delivered once, in order",
+                   [str(n) for n in range(1, len(x_pended) + 1)], delivered)
 
         # --- $inquire after the review ------------------------------------------------------
         for name, *_rest, after in SCENARIOS:
@@ -583,7 +657,34 @@ def main() -> None:
             after = next(s[8] for s in SCENARIOS if s[0] == name)
             checks.add("end to end", f"{name}: the member's app reads the decision ({after}) and lists it",
                        [200, after, True], [status, review_code(eob), pa_ids[name] in listed])
+        # Provider Y's endpoint refused everything: after the last retry the
+        # subscription is in error, and its second event was never attempted.
+        deadline = time.time() + sum(RETRY_DELAYS) + 30
+        status, st = None, {}
+        while time.time() < deadline:
+            status, st = http.call("GET", f"/Subscription/{sub_y.get('id')}/$status", client=Y.client)
+            if status != 200 or status_param(st, "status") == "error":
+                break
+            time.sleep(3)
+        y_pended = sum(1 for s in SCENARIOS if s[7] == "A4" and s[1] == "Y")
+        checks.add("notifications", "provider Y: in error after the retries, both events counted",
+                   [200, "error", str(y_pended)],
+                   [status, status_param(st, "status"), status_param(st, "events-since-subscription-start")])
+        y_tries = [a for a in listener.attempts if a["subscription"].endswith(f"/Subscription/{sub_y.get('id')}")
+                   and a["type"] == "event-notification"]
+        checks.add("notifications", "provider Y: event 1 attempted once and retried six times, event 2 never",
+                   [["1"] * (1 + len(RETRY_DELAYS)), [503] * (1 + len(RETRY_DELAYS))],
+                   [[a["event"] for a in y_tries], [a["status"] for a in y_tries]])
+        y_gaps = [round(b["at"] - a["at"]) for a, b in zip(y_tries, y_tries[1:])]
+        checks.add("notifications", "provider Y: retries after 2, 4, 8, 16, 32 and 64 s (backoff)", True,
+                   len(y_gaps) == len(RETRY_DELAYS) and all(d - 1 <= g <= d + 3 for g, d in zip(y_gaps, RETRY_DELAYS)))
+        report_extra = {"x_retry_gaps": gaps, "y_retry_gaps": y_gaps}
     finally:
+        # The subscriptions are kept by the payer: remove this run's, so the next run
+        # (on the same database) is not notified through them.
+        for created, p in ((sub, X), (sub_y, Y)):
+            if created.get("id") and p:
+                http.call("DELETE", f"/Subscription/{created['id']}", client=p.client)
         listener.close()
         gold.close()
 
@@ -592,7 +693,7 @@ def main() -> None:
         by_group[r["group"]][0] += r["passed"]
         by_group[r["group"]][1] += 1
     report = {"gateway": args.base, "run": run, "service_date": when,
-              "providers": {k: v.id for k, v in prov.items()},
+              "providers": {k: v.id for k, v in prov.items()}, "notifications": report_extra,
               "requests": {s[0]: {"pa_id": sent[s[0]]["pa_id"], "member": sent[s[0]]["member"], "on_arrival": s[7],
                                   "after_review": s[8]} for s in SCENARIOS},
               "passed": sum(r["passed"] for r in checks.results), "total": len(checks.results),

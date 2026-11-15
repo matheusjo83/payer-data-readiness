@@ -42,8 +42,15 @@ Codes of X12 code lists (service type 1365, request type 1525, certification
 type 1322, entity 98, review decision 306) are the ones the PAS examples use;
 X12 code lists are licensed, so nothing here can verify them.
 
-The subscriptions and the record of what was notified live in memory: a
-restart forgets them (decisions made before it are not notified).
+Notifications (PriorAuthService): the subscriptions and the record of what was
+notified are kept in the payer's database, schema pas_notify (not read by CDC),
+so a restart forgets nothing and a decision made while the gateway was down is
+notified when it is back. A failed delivery is retried six times, after 2, 4,
+8, 16, 32 and 64 s (PAS_RETRY_BASE_SECONDS, PAS_RETRIES), then the
+subscription goes to error. A subscription's endpoint must be one the provider
+registered with the authorization server (notification_endpoints, which
+fhir/auth/clients.py also writes apart from the keys, read from
+NOTIFICATION_ENDPOINTS_FILE).
 """
 
 import json
@@ -595,6 +602,7 @@ def submit(upstream, base: str, provider_id: str, body: dict, service: "PriorAut
     decision = "P" if unmet else "A"
     urgent = "Y" if "stat" in codes(sub.claim.get("priority"), "http://terminology.hl7.org/CodeSystem/processpriority") \
         else "N"
+    service.require_ready()
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_advisory_xact_lock(hashtext('pa_req'))")
         existing = load_request(cur, "prv_id = %s AND sbmsn_id = %s AND src_cd = 'F'", [provider_id, request_id])
@@ -613,9 +621,9 @@ def submit(upstream, base: str, provider_id: str, body: dict, service: "PriorAut
             cur.execute("INSERT INTO pa_doc (pa_id, qnr_url, item_id, ans_txt, ans_src, upd_ts) "
                         "VALUES (%s, %s, %s, %s, %s, %s)", [req["pa_id"], qr["questionnaire"][:120], link_id[:40],
                                                              answer, source, t])
+        if decision == "A":  # answered now: not an event to notify later
+            mark_decided(cur, req["pa_id"])
         conn.commit()
-    if decision == "A":
-        service.mark_notified(req["pa_id"])
     note = None if decision == "A" else "Pended for clinical review: " + "; ".join(unmet)
     return response_bundle(base, req, sub, note=note)
 
@@ -636,19 +644,65 @@ def inquire(upstream, base: str, provider_id: str, body: dict) -> dict:
 
 # --- Subscriptions ---------------------------------------------------------------------
 
+SCHEMA = """
+CREATE SCHEMA IF NOT EXISTS pas_notify;
+CREATE TABLE IF NOT EXISTS pas_notify.state (key text PRIMARY KEY, value text NOT NULL);
+CREATE TABLE IF NOT EXISTS pas_notify.subscription (
+    id text PRIMARY KEY, owner text NOT NULL, resource jsonb NOT NULL, content text NOT NULL,
+    status text NOT NULL, events integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS pas_notify.decided (pa_id text PRIMARY KEY, seen_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS pas_notify.delivery (
+    subscription_id text NOT NULL REFERENCES pas_notify.subscription ON DELETE CASCADE,
+    event_number integer NOT NULL, pa_id text NOT NULL,
+    status text NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts integer NOT NULL DEFAULT 0, next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    last_error text, created_at timestamptz NOT NULL DEFAULT now(), sent_at timestamptz,
+    PRIMARY KEY (subscription_id, event_number));
+"""
+RETRY_BASE_SECONDS = float(os.environ.get("PAS_RETRY_BASE_SECONDS", "2"))
+RETRIES = int(os.environ.get("PAS_RETRIES", "6"))
+ENDPOINTS_FILE = os.environ.get("NOTIFICATION_ENDPOINTS_FILE", "/opt/auth-endpoints/notification_endpoints.json")
+
+
+def ensure_schema(cur) -> None:
+    cur.execute("SELECT pg_advisory_xact_lock(hashtext('pas_notify'))")
+    cur.execute(SCHEMA)
+    if cur.execute("SELECT 1 FROM pas_notify.state WHERE key = 'initialized'").fetchone() is None:
+        # First start: what was decided before it is history, not an event.
+        cur.execute("INSERT INTO pas_notify.decided (pa_id) SELECT pa_id FROM pa_req "
+                    "WHERE src_cd = 'F' AND dcsn_cd <> 'P' ON CONFLICT DO NOTHING")
+        cur.execute("INSERT INTO pas_notify.state VALUES ('initialized', now()::text)")
+
+
+def mark_decided(cur, pa_id: str) -> None:
+    """A decision the provider got in the $submit answer: not an event to notify."""
+    cur.execute("INSERT INTO pas_notify.decided (pa_id) VALUES (%s) ON CONFLICT DO NOTHING", [pa_id])
+
+
+def registered_endpoints(provider_id: str) -> list[str]:
+    """The notification endpoints the provider's client registered with the authorization server."""
+    try:
+        with open(ENDPOINTS_FILE) as f:
+            return list(json.load(f).get(f"provider-{provider_id}", []))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 class PriorAuthService:
-    """The subscriptions (in memory) and the notifier thread."""
+    """The PAS subscriptions and their notifications, kept in the payer's database
+    (schema pas_notify, which CDC does not read): a restart forgets nothing.
 
-    def __init__(self, upstream, public_base: str, interval: float = 2.0):
+    Every decision on a request sent through $submit (src_cd F) is an event once:
+    pas_notify.decided records the decisions already handled. Each event of an
+    active subscription becomes a delivery (an outbox row), sent in event order;
+    a failed one is retried after RETRY_BASE_SECONDS, then twice as long each time,
+    RETRIES times (after 2, 4, 8, 16, 32 and 64 s by default, about two minutes),
+    and when the last retry fails too the delivery is failed and the subscription
+    goes to error (Subscriptions backport)."""
+
+    def __init__(self, upstream, public_base: str, interval: float = 1.0):
         self.upstream, self.base, self.interval = upstream, public_base.rstrip("/"), interval
-        self.subscriptions: dict[str, dict] = {}
-        self.lock = threading.Lock()
-        self.notified: set[str] | None = None
-
-    def mark_notified(self, pa_id: str) -> None:
-        with self.lock:
-            if self.notified is not None:
-                self.notified.add(pa_id)
+        self.ready = threading.Event()
 
     def start(self) -> None:
         threading.Thread(target=self.loop, daemon=True).start()
@@ -656,37 +710,91 @@ class PriorAuthService:
     def loop(self) -> None:
         while True:
             try:
-                self.tick()
+                if not self.ready.is_set():
+                    with connect() as conn, conn.cursor() as cur:
+                        ensure_schema(cur)
+                    self.ready.set()
+                self.collect()
+                self.deliver()
             except Exception:  # noqa: BLE001 - the database may not be up yet; try again
                 traceback.print_exc()
             time.sleep(self.interval)
 
-    def tick(self) -> None:
+    def require_ready(self) -> None:
+        if not self.ready.wait(30):
+            raise PAError(503, "The notification store is not available yet", "transient")
+
+    def collect(self) -> None:
+        """Turn the new decisions into deliveries, in one transaction."""
         with connect() as conn, conn.cursor() as cur:
-            decided = cur.execute("SELECT pa_id FROM pa_req WHERE src_cd = 'F' AND dcsn_cd <> 'P'").fetchall()
-            with self.lock:
-                if self.notified is None:  # first run: what was decided before this start is not notified
-                    self.notified = {r[0] for r in decided}
-                    return
-                new = [r[0] for r in decided if r[0] not in self.notified]
-            for pa_id in new:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('pas_notify.collect'))")
+            new = cur.execute("SELECT r.pa_id, r.prv_id FROM pa_req r LEFT JOIN pas_notify.decided d USING (pa_id) "
+                              "WHERE r.src_cd = 'F' AND r.dcsn_cd <> 'P' AND d.pa_id IS NULL ORDER BY r.upd_ts, r.pa_id"
+                              ).fetchall()
+            for pa_id, owner in new:
+                # Every subscription of the provider counts the event (events-since-
+                # subscription-start); only an active one gets a delivery.
+                for sid, status in cur.execute("UPDATE pas_notify.subscription SET events = events + 1 "
+                                               "WHERE owner = %s RETURNING id, status", [owner]).fetchall():
+                    if status != "active":
+                        continue
+                    cur.execute("INSERT INTO pas_notify.delivery (subscription_id, event_number, pa_id, status) "
+                                "SELECT id, events, %s, 'pending' FROM pas_notify.subscription WHERE id = %s",
+                                [pa_id, sid])
+                mark_decided(cur, pa_id)
+            conn.commit()
+
+    def deliver(self) -> None:
+        """Send each subscription's first pending delivery that is due."""
+        with connect() as conn, conn.cursor() as cur:
+            due = cur.execute(
+                "SELECT DISTINCT ON (d.subscription_id) d.subscription_id, d.event_number, d.pa_id, d.attempts, "
+                "d.next_attempt_at <= now() FROM pas_notify.delivery d "
+                "WHERE d.status = 'pending' ORDER BY d.subscription_id, d.event_number").fetchall()
+            for sid, number, pa_id, attempts, is_due in due:
+                if not is_due:
+                    continue
+                s = self.load(cur, sid)
                 req = load_request(cur, "pa_id = %s", [pa_id])
-                self.notify(req)
-                with self.lock:
-                    self.notified.add(pa_id)
+                ok, error = self.send(s, "event-notification", response_bundle(self.base, req, None), number)
+                if ok:
+                    cur.execute("UPDATE pas_notify.delivery SET status = 'sent', attempts = attempts + 1, "
+                                "sent_at = now(), last_error = NULL WHERE subscription_id = %s AND event_number = %s",
+                                [sid, number])
+                elif attempts >= RETRIES:  # the first attempt and RETRIES retries have failed
+                    cur.execute("UPDATE pas_notify.delivery SET status = 'failed', attempts = attempts + 1, "
+                                "last_error = %s WHERE subscription_id = %s AND event_number = %s",
+                                [error, sid, number])
+                    self.set_status(cur, sid, "error", f"Notification {number} failed {attempts + 1} times: {error}")
+                    cur.execute("UPDATE pas_notify.delivery SET status = 'failed', last_error = 'subscription in error' "
+                                "WHERE subscription_id = %s AND status = 'pending'", [sid])
+                else:
+                    delay = RETRY_BASE_SECONDS * 2 ** attempts
+                    cur.execute("UPDATE pas_notify.delivery SET attempts = attempts + 1, last_error = %s, "
+                                "next_attempt_at = now() + make_interval(secs => %s) "
+                                "WHERE subscription_id = %s AND event_number = %s", [error, delay, sid, number])
+                conn.commit()
+
+    def load(self, cur, sid: str) -> dict | None:
+        row = cur.execute("SELECT id, owner, resource, content, status, events FROM pas_notify.subscription "
+                          "WHERE id = %s", [sid]).fetchone()
+        if row is None:
+            return None
+        resource = row[2] if isinstance(row[2], dict) else json.loads(row[2])
+        return {"id": row[0], "owner": row[1], "resource": resource, "content": row[3], "events": row[5]}
+
+    def set_status(self, cur, sid: str, status: str, error: str | None = None) -> None:
+        s = self.load(cur, sid)
+        s["resource"]["status"] = status
+        if error:
+            s["resource"]["error"] = error
+        cur.execute("UPDATE pas_notify.subscription SET status = %s, resource = %s WHERE id = %s",
+                    [status, json.dumps(s["resource"]), sid])
 
     def npi_filter(self, provider_id: str) -> str:
         return f"orgIdentifier={NPI}|{provider_npi(self.upstream, provider_id)}"
 
-    def notify(self, req: dict) -> None:
-        with self.lock:
-            subs = [s for s in self.subscriptions.values()
-                    if s["owner"] == req["prv_id"] and s["resource"]["status"] == "active"]
-        for s in subs:
-            s["events"] += 1
-            self.send(s, "event-notification", response_bundle(self.base, req, None))
-
-    def status_parameters(self, s: dict, kind: str, focus: dict | None = None) -> dict:
+    def status_parameters(self, s: dict, kind: str, focus: dict | None = None, number: int | None = None) -> dict:
         params = [{"name": "subscription", "valueReference": {"reference": f"{self.base}/Subscription/{s['id']}"}},
                   {"name": "topic", "valueCanonical": PAS_TOPIC},
                   {"name": "status", "valueCode": s["resource"]["status"]},
@@ -694,14 +802,14 @@ class PriorAuthService:
                   {"name": "events-since-subscription-start", "valueString": str(s["events"])}]
         if focus is not None:
             params.append({"name": "notification-event", "part": [
-                {"name": "event-number", "valueString": str(s["events"])},
+                {"name": "event-number", "valueString": str(number if number is not None else s["events"])},
                 {"name": "timestamp", "valueInstant": instant(now())},
                 {"name": "focus", "valueReference": {"reference": f"{self.base}/Bundle/{focus['id']}"}}]})
         return {"resourceType": "Parameters", "id": str(uuid.uuid4()),
                 "meta": {"profile": [BACKPORT + "backport-subscription-status-r4"]}, "parameter": params}
 
-    def notification(self, s: dict, kind: str, focus: dict | None = None) -> dict:
-        status = self.status_parameters(s, kind, focus)
+    def notification(self, s: dict, kind: str, focus: dict | None = None, number: int | None = None) -> dict:
+        status = self.status_parameters(s, kind, focus, number)
         entries = [{"fullUrl": f"urn:uuid:{status['id']}", "resource": status,
                     "request": {"method": "GET", "url": f"{self.base}/Subscription/{s['id']}/$status"},
                     "response": {"status": "200"}}]
@@ -712,20 +820,20 @@ class PriorAuthService:
                 "meta": {"profile": [BACKPORT + "backport-subscription-notification-r4"]},
                 "type": "history", "timestamp": instant(now()), "entry": entries}
 
-    def send(self, s: dict, kind: str, focus: dict | None = None) -> bool:
-        body = json.dumps(self.notification(s, kind, focus)).encode()
+    def send(self, s: dict, kind: str, focus: dict | None = None, number: int | None = None) -> tuple[bool, str]:
+        body = json.dumps(self.notification(s, kind, focus, number)).encode()
         req = urllib.request.Request(s["resource"]["channel"]["endpoint"], data=body, method="POST",
                                      headers={"Content-Type": "application/fhir+json"})
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                ok = 200 <= resp.status < 300
-        except (urllib.error.URLError, OSError):
-            ok = False
-        if not ok:
-            s["resource"]["status"] = "error"
-        return ok
+                return 200 <= resp.status < 300, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            return False, str(getattr(e, "reason", e))[:200]
 
     def create(self, provider_id: str, resource: dict) -> dict:
+        self.require_ready()
         if resource.get("resourceType") != "Subscription":
             raise PAError(400, "The body must be a Subscription", "invalid")
         if resource.get("criteria") != PAS_TOPIC:
@@ -740,29 +848,37 @@ class PriorAuthService:
                         if e.get("url") == BACKPORT + "backport-payload-content"), "id-only")
         if channel.get("type") != "rest-hook" or not str(channel.get("endpoint", "")).startswith(("http://", "https://")):
             raise PAError(422, "This server offers rest-hook channels only", "not-supported")
+        if channel["endpoint"] not in registered_endpoints(provider_id):
+            # Only endpoints the provider registered, so the payer never posts to an arbitrary URL.
+            raise PAError(422, "The endpoint is not one this provider registered for notifications", "business-rule")
         if content not in ("id-only", "full-resource"):
             raise PAError(422, "The payload content must be id-only or full-resource", "not-supported")
         sid = str(uuid.uuid4())
-        stored = {**resource, "id": sid, "status": "requested"}
+        stored = {**resource, "id": sid, "status": "active"}
         s = {"id": sid, "owner": provider_id, "resource": stored, "events": 0, "content": content}
-        with self.lock:
-            self.subscriptions[sid] = s
-        stored["status"] = "active"
-        if not self.send(s, "handshake"):
+        ok, error = self.send(s, "handshake")
+        if not ok:
             stored["status"] = "error"
-            stored["error"] = "The handshake to the endpoint failed"
+            stored["error"] = f"The handshake to the endpoint failed: {error}"
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO pas_notify.subscription (id, owner, resource, content, status) "
+                        "VALUES (%s, %s, %s, %s, %s)", [sid, provider_id, json.dumps(stored), content, stored["status"]])
+            conn.commit()
         return stored
 
     def get(self, provider_id: str, sid: str) -> dict:
-        s = self.subscriptions.get(sid)
+        self.require_ready()
+        with connect() as conn, conn.cursor() as cur:
+            s = self.load(cur, sid)
         if s is None or s["owner"] != provider_id:
             raise PAError(404, "Unknown Subscription", "not-found")
         return s
 
     def delete(self, provider_id: str, sid: str) -> None:
         self.get(provider_id, sid)
-        with self.lock:
-            self.subscriptions.pop(sid, None)
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM pas_notify.subscription WHERE id = %s", [sid])
+            conn.commit()
 
     def status_bundle(self, provider_id: str, sid: str) -> dict:
         s = self.get(provider_id, sid)
