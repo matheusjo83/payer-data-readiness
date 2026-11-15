@@ -411,3 +411,109 @@ models:
         description: ViewDefinition rows with no identical reference row (EXCEPT ALL).
       - name: only_in_reference
         description: Reference rows with no identical ViewDefinition row (EXCEPT ALL).
+
+  - name: quality_runs
+    description: >
+      The runs of the data quality history (scripts/quality_history.py): the CI
+      runs of main, local runs, and the run collecting. Volume columns come from
+      the run's metrics; a run whose metrics come from its CI reports only has
+      the resources it published, not the lakehouse row counts.
+    columns:
+      - name: run_key
+        description: ci-<GitHub run id> or local-<UTC time of the snapshot>.
+        data_tests: [unique, not_null]
+      - name: run_at
+        description: When the run started (CI) or the snapshot was taken (local).
+        data_tests: [not_null]
+      - name: commit
+        description: The commit the run tested (a pull request's run tests its merge into main).
+      - name: short_commit
+        description: The first seven characters of the commit.
+      - name: branch
+        description: Branch of the run.
+      - name: scenario
+        description: Data scenario (base = the generators' default volumes; the scale benchmark adds others).
+        data_tests: [not_null]
+      - name: source
+        description: ci or local.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [ci, local]
+      - name: ci_run_id
+        description: GitHub Actions run id (CI runs only).
+      - name: ci_event
+        description: Event that started the CI run (push, pull_request).
+      - name: conclusion
+        description: Conclusion of a finished CI run (success, failure); empty for the run collecting and local runs.
+      - name: duration_seconds
+        description: Duration of a finished CI run, from its start to its last update.
+      - name: metrics_from
+        description: snapshot (taken by the run, with the lakehouse metrics) or reports (rebuilt from the run's reports artifact).
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [snapshot, reports]
+      - name: metrics
+        description: Number of metrics of the run.
+      - name: areas
+        description: Number of metric areas of the run.
+      - name: legacy_members
+        description: Members in the legacy source (silver.stg_legacy__members).
+      - name: legacy_claims
+        description: Legacy claims (gold.fct_claims).
+      - name: synthea_patients
+        description: Synthea patients (silver.stg_fhir__patients).
+      - name: pbm_claims
+        description: PBM claims (gold.fct_pbm_claims).
+      - name: fhir_resources_published
+        description: Resources published to both FHIR servers.
+      - name: run_number
+        description: Position of the run in its series (source, branch, scenario), from 1.
+
+  - name: quality_history
+    description: >
+      Every metric of every run in quality_runs, with the value of the same
+      metric in the previous run of its series (source, branch, scenario). One
+      row per run, area, metric and dimension.
+    columns:
+      - name: run_key
+        description: The run (quality_runs).
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('quality_runs')
+                field: run_key
+      - name: run_at
+        description: When the run started or the snapshot was taken.
+      - name: short_commit
+        description: The run's commit, seven characters.
+      - name: source
+        description: ci or local.
+      - name: branch
+        description: Branch of the run.
+      - name: scenario
+        description: Data scenario.
+      - name: metrics_from
+        description: snapshot or reports.
+      - name: area
+        description: Metric area.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [load, cdc, fhir, linkage, data_quality, tests, performance, volume]
+      - name: metric
+        description: Metric name, e.g. match_precision or validation_errors.
+        data_tests: [not_null]
+      - name: dimension
+        description: What the metric is of (a source, table, method, implementation guide); empty for a total.
+        data_tests: [not_null]
+      - name: value
+        description: The metric's value.
+      - name: previous_run_key
+        description: The previous run of the series; empty for its first run.
+      - name: previous_value
+        description: The metric's value in the previous run; empty if that run did not have it.
+      - name: change
+        description: value - previous_value.

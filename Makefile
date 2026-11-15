@@ -1,15 +1,15 @@
 PY ?= python
 
-.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-prior-auth fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check fhir-prior-auth-check pa-review docs docs-static airflow-up airflow-down all
+.PHONY: up down reset seed pbm synthea ingest cdc changes slot-check slot-drill cdc-check cdc-reconcile views conformance dbt review coverage fhir-validate fhir-validate-carin fhir-validate-pdex fhir-validate-provider fhir-validate-p2p fhir-validate-prior-auth fhir-validate-all fhir-up fhir-clients fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check fhir-prior-auth-check pa-review dq-snapshot dq-history dq-check dashboard-up docs docs-static airflow-up airflow-down all
 
 up:        ## Build and start the legacy Postgres database (with wal2json for CDC) and the lakehouse catalog (DuckLake)
 	docker compose up -d --build --wait legacy-db lakehouse-catalog
 
 down:      ## Stop containers (including Airflow and the FHIR servers)
-	docker compose --profile airflow --profile api down
+	docker compose --profile airflow --profile api --profile dashboard down
 
 reset:     ## Stop containers and delete all local data
-	docker compose --profile airflow --profile api down -v
+	docker compose --profile airflow --profile api --profile dashboard down -v
 	rm -rf data/
 
 seed:      ## Generate synthetic legacy payer data (with deliberate quality issues)
@@ -54,8 +54,9 @@ views:     ## Compile the SQL on FHIR ViewDefinitions (fhir/view_definitions) in
 conformance: ## Run the official SQL on FHIR v2 test suite against the ViewDefinition compiler
 	$(PY) fhir/conformance.py
 
-dbt:       ## Build silver and gold layers and run data tests
+dbt:       ## Build silver and gold layers and run data tests (the results are kept in data/dbt_run_results.json for the quality history)
 	cd dbt && dbt build --profiles-dir .
+	mkdir -p data && cp dbt/target/run_results.json data/dbt_run_results.json
 
 review:    ## Work the identity review queue as a simulated reviewer (ground truth) until it is empty; writes dbt/seeds/identity_review_decisions.csv
 	@for round in 1 2 3 4 5; do \
@@ -120,6 +121,20 @@ pa-review: ## Simulated reviewer: decide the prior authorization requests Da Vin
 
 fhir-provider-api-check: ## Check the Provider Access and Payer-to-Payer APIs (gateway) against gold: attribution, $$davinci-data-export, opt-outs, $$bulk-member-match (writes data/fhir_provider_api.json)
 	$(PY) fhir/provider_api_check.py
+
+dq-snapshot: ## Record this run's quality metrics (the reports in data/ and the quality marts) in data/quality_snapshot.json; DQ_SCENARIO names the scenario (default base)
+	cd dbt && dbt build --profiles-dir . -s load_reliability cdc_latency cdc_slot_lag > /dev/null
+	$(PY) scripts/quality_history.py snapshot
+
+dq-history: ## Collect the quality snapshots (CI runs of main from GitHub, local runs, this run) into the lakehouse and build gold.quality_runs and gold.quality_history
+	$(PY) scripts/quality_history.py collect
+	cd dbt && dbt build --profiles-dir . -s quality_runs quality_history assert_quality_history_unique
+
+dashboard-up: ## Start the data quality history dashboard at http://localhost:8501 (after dq-history)
+	docker compose --profile dashboard up -d --build --wait quality-dashboard
+
+dq-check: ## Check the quality snapshot, the history and the dashboard against their sources (writes data/quality_check.json)
+	$(PY) scripts/quality_check.py
 
 docs:      ## Generate and serve dbt docs (lineage graph)
 	cd dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir .

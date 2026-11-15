@@ -121,7 +121,8 @@ decoding plugin for CDC), **DuckDB** with **DuckLake** (lakehouse engine and for
 catalog, Parquet data), **dbt** (transformations, tests, lineage),
 **Synthea** (synthetic FHIR data), **Splink** (probabilistic record linkage), **Python** (ingestion),
 **Apache Airflow** (orchestration, Docker), **HAPI FHIR** (the FHIR APIs, Docker), and a small
-**Python** gateway (standard library) for the Da Vinci PDex operations HAPI does not implement.
+**Python** gateway (standard library) for the Da Vinci PDex operations HAPI does not implement, and
+**Streamlit** (the data quality history dashboard, Docker).
 
 ## Quickstart
 
@@ -172,6 +173,15 @@ make fhir-validate-prior-auth  # validate the prior authorization exchange the c
 make fhir-validate-all    # fhir-validate-carin, -pdex, -provider, -p2p and -prior-auth in one validator run, as CI does
 ```
 
+Data quality history:
+
+```bash
+make dq-snapshot          # record this run's quality metrics (reports in data/, quality marts) in data/quality_snapshot.json
+make dq-history           # collect the snapshots (main's CI runs from GitHub, local runs, this one) into gold.quality_history
+make dashboard-up         # the dashboard of the history at http://localhost:8501
+make dq-check             # check the snapshot, the history and the dashboard against their sources
+```
+
 The legacy schema gained columns in Phase 6, `pa_req.req_amt` with the FHIR API, the table
 `mbr_cnsnt` with the Provider Access API, and seven `pa_req` columns and the table `pa_doc` with
 the prior authorization exchange. A database created before any of them needs a new legacy
@@ -200,13 +210,15 @@ result against a full rebuild and against Postgres.
 **Continuous integration.** On every pull request and push to `main`, GitHub Actions
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make up fhir-up seed pbm synthea ingest
 slot-drill dbt conformance fhir-publish fhir-api-check fhir-provider-api-check fhir-security-check
-fhir-prior-auth-check fhir-validate-all cdc-check` on a clean runner (`fhir-validate-all` runs the five
+fhir-prior-auth-check fhir-validate-all cdc-check dq-snapshot dq-history dashboard-up dq-check` on a clean runner (`fhir-validate-all` runs the five
 `fhir-validate-*` samples with IGs in one HL7 validator run). The run fails
 if the slot drill fails, if a model or data test fails, if any shareable SQL on FHIR test fails, if
 the HL7 validator reports an error against the CARIN Blue Button or PDex profiles in the samples or
 the Payer-to-Payer messages, or against CRD, DTR or PAS in the prior authorization exchange, if a check
 of a FHIR API against gold, of its authorization or of the prior authorization exchange fails, or if the incremental
-current state differs from a full rebuild or from Postgres.
+current state differs from a full rebuild or from Postgres, or if the data quality history or its
+dashboard differs from their sources. Each run uploads its quality snapshot as an artifact, which the
+next runs collect into the history.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
@@ -228,6 +240,7 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 | Provider Access and Payer-to-Payer | 300 attribution lists from claims, 89 opted-out members left out and checked again at export; claims without financial data valid against the CARIN Basis profiles, attribution lists and opt-outs against PDex 2.1.0 (0 errors); 129 of 129 checks through the PDex gateway passed, including an opt-out added after the list was built and a 22-member `$bulk-member-match` |
 | API security        | SMART App Launch (PKCE) for Patient Access and SMART Backend Services (signed JWTs) for Provider Access and Payer-to-Payer; 73 of 73 checks passed: a member's app sees only that member, a provider only members on its list who have not opted out (an opt-out applies to the next search), another payer only its own match groups |
 | Prior authorization | Da Vinci CRD, DTR and PAS 2.1.0 on the payer side: 91 of 91 checks passed for 9 requests from two providers' simulated EHRs, from the order (coverage requirements) through the questionnaire, the submission (approved or pended on arrival), the reviewer's decisions and the Subscription notifications, to the legacy tables, gold (PDex) and the member's app; the exchange validates with 0 errors and 0 warnings |
+| Data quality history | Every CI run of `main` since the first (16, from their reports) and each new run's 339 metrics in `gold.quality_history`, with a dashboard; 43 of 43 checks of the snapshot, the history and the dashboard against their sources passed |
 | Terminology         | Every ICD-10-CM, NDC and place of service code in the 29,224 exported claims valid on its service date (CMS and FDA releases); CPT, NUBC and NCPDP codes counted as unverified |
 
 ## Roadmap
@@ -252,21 +265,23 @@ and how to reproduce it are in [docs/results.md](docs/results.md).
 - [x] **Export file expiry:** the `Expires` the export status announces fixed when the job ends and enforced on the status and the files, expired jobs and files removed, HAPI's own copies deleted once read, a restart that leaves no file, and at most two running exports per client
 - [x] **Robust PAS notifications:** subscriptions and the record of what was notified kept in the payer's database (an outbox), so a restart forgets nothing; failed deliveries retried with backoff, then the subscription in error; and only the rest-hook endpoints each provider registered
 
+- [x] **Data quality history:** each run's metrics stored with its date, commit, scenario and volume (main's CI runs, back to the first, and local runs), in `gold.quality_history`, and a dashboard of load reliability, CDC latency, FHIR conformance and linkage quality over time
+
 Backlog (not started), in the order planned:
 
 *Operations and scale*
 
-- [ ] **Data quality history:** store each run's metrics with its date, commit, scenario and volume, then a dashboard of load reliability, CDC latency, FHIR conformance and linkage quality over time
 - [ ] **Scale benchmark:** the current base, 10× and 30× (the PBM feed and its ground truth scaled with it), measuring initial load, incremental refresh and resources in DuckLake, and candidate pairs, blocking, precision and recall in Splink
 
 ## Project structure
 
 ```
 legacy_db/     Legacy schema, Postgres image (wal2json), data generator and activity simulator
-scripts/       Synthea download and configuration, PBM feed generator, simulated identity reviewer, dbt coverage report
+scripts/       Synthea download and configuration, PBM feed generator, simulated identity reviewer, dbt coverage report, data quality history and its check
 ingestion/     Lakehouse connection (DuckLake) and bronze-layer loaders (CDC for legacy, NDJSON for FHIR, files for the PBM, CMS and FDA code lists) with load logging
 dbt/           Silver and gold models (including the Splink Python models), seeds (with the review decisions), tests, lineage
 airflow/       Airflow image and DAGs
+dashboard/     Data quality history dashboard (Streamlit image)
 fhir/          SQL on FHIR ViewDefinitions, DuckDB compiler, conformance runner, HL7 validation (base, CARIN, PDex), FHIR server publish, the PDex gateway and API checks
 docs/          Technical write-up, migration checklist, architecture details and results
 .github/       CI workflow (runs the Quickstart and the FHIR checks on every pull request)

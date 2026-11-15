@@ -1,3 +1,6 @@
-# Build context for airflow/Dockerfile (repository root): only requirements.txt is needed.
+# Build context of the images built from the repository root: airflow/Dockerfile
+# needs requirements.txt, dashboard/Dockerfile the dashboard and the lakehouse connection.
 *
 !requirements.txt
+!dashboard/
+!ingestion/lakehouse.py

@@ -1,0 +1,4 @@
+# The lakehouse's DuckDB version (requirements.txt), so the DuckLake catalog matches.
+duckdb==1.5.6
+streamlit==1.48.1
+pandas==2.3.1

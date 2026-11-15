@@ -13,3 +13,14 @@ sources:
           State of the CDC replication slot, recorded by the loader before each
           sync (action = sync) and when it finds the slot lost and takes a new
           snapshot (action = resnapshot). Append-only.
+      - name: quality_runs
+        identifier: _quality_runs
+        description: >
+          One row per pipeline run in the data quality history (CI runs of main
+          and local runs), written by scripts/quality_history.py collect, which
+          replaces the table each time.
+      - name: quality_metrics
+        identifier: _quality_metrics
+        description: >
+          The quality metrics of each run in bronze._quality_runs: one row per
+          area, metric and dimension.

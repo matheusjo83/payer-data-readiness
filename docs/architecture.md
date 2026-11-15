@@ -629,3 +629,52 @@ Identity resolution happens in the data layer, before anything reaches the API:
   resources (Pharmacy profile) that reference the member's Patient and Coverage and the pharmacy's
   Organization; the view parity and the CARIN validation cover them as a separate sample. Claims
   of cardholders in review or unmatched stay in `fct_pbm_claims`, flagged.
+
+## Data quality history
+
+Each run of the pipeline measures its quality in two places: the reports the checks write in
+`data/` (SQL on FHIR conformance, the HL7 validator summaries, the API checks, the CDC
+reconciliation, the dbt results) and the quality marts in gold (load reliability, CDC latency
+and the replication slot, linkage and deduplication quality against ground truth, the legacy
+issues detected, view parity, terminology). Both start from empty on every CI runner, so nothing
+accumulated from one run to the next. `scripts/quality_history.py` keeps them.
+
+- **Snapshot** (`make dq-snapshot`). At the end of a run, after rebuilding the three marts that
+  read operational tables (`load_reliability`, `cdc_latency`, `cdc_slot_lag`: the prior
+  authorization and CDC checks sync changes after the full dbt build), it writes
+  `data/quality_snapshot.json`: the run (key, time, commit, branch, scenario, ci or local, the
+  GitHub run) and its metrics, each one area, metric, dimension and value. The areas are `load`,
+  `cdc`, `fhir`, `linkage`, `data_quality`, `tests`, `performance` and `volume`; the dimension
+  says what a metric is of (a source, a table, a method, an implementation guide), empty for a
+  total. A local run keeps a copy in `data/quality_history/local/`. The scenario (`DQ_SCENARIO`,
+  `base` by default) is how the scale benchmark will mark its runs.
+- **Store.** CI uploads the snapshot as the `quality-snapshot` artifact, so the history needs no
+  database that outlives a runner and no commit from CI. The cost is GitHub's retention of
+  artifacts (90 days); the releases keep their reports as assets.
+- **Collect** (`make dq-history`). Lists the finished CI runs of `main` (the GitHub API, with the
+  workflow token in CI and `gh auth token` locally), downloads each one's snapshot, keeps it in
+  `data/quality_history/ci/` and does not download it again. Runs from before the snapshot have
+  none: their `reports` artifact is read instead, so the history goes back to the first run, with
+  the metrics the reports hold (conformance, validation, API checks, reconciliation, dbt tests,
+  published volume) and without those only the lakehouse had (load, CDC latency, linkage, data
+  quality issues). Artifacts are read in memory, member by member, never extracted. The local
+  copies and this run's snapshot are added (a CI run is still going when it collects), and all of
+  them replace `bronze._quality_runs` and `bronze._quality_metrics`.
+- **Models.** `gold.quality_runs` has one row per run, with its volume and its position in its
+  series; `gold.quality_history` every metric of every run, with the value the same metric had in
+  the previous run of its series. A series is a source, a branch and a scenario: the CI runs of
+  main are one, a pull request's run starts its own, and each scale of the benchmark will be
+  another.
+- **Dashboard** (`make dashboard-up`, http://localhost:8501). A Streamlit app in its own image
+  (`dashboard/`), in the `dashboard` compose profile, which attaches the lakehouse read-only (the
+  catalog, and the Parquet files mounted read-only). One series at a time, main's by default: the
+  latest run's headline numbers with the change from the run before, then a tab per area, run by
+  run (load reliability, CDC latency, FHIR conformance, linkage quality, data quality and tests,
+  performance, the runs). The charts take their colors from a categorical palette checked for
+  color vision deficiencies, in a fixed order per metric, with darker-theme steps under a dark theme.
+- **Check** (`make dq-check`, `scripts/quality_check.py`). Computes each expected value again
+  from its source: the snapshot against the reports, the marts, bronze's CDC changes and row
+  counts; the history against the snapshots on disk and the runs GitHub lists, and the latest
+  rebuilt run against its reports artifact downloaded again; gold's previous values against the
+  two latest runs of main ordered from bronze; and the dashboard, run headless in its container
+  (Streamlit's AppTest), against gold's headline numbers for main's latest run and this run's.
