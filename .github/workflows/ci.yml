@@ -16,6 +16,8 @@
 # current state is checked against a full rebuild and against Postgres. The
 # lakehouse is DuckLake: a catalog in Postgres (lakehouse-catalog), Parquet data.
 # The five validator samples run in one validator call, after the API checks.
+# Last, the run's quality metrics are recorded and collected with those of main's
+# earlier runs into the data quality history, and its dashboard is checked.
 name: CI
 
 on:
@@ -26,6 +28,8 @@ on:
 
 permissions:
   contents: read
+  # The data quality history reads the artifacts of main's earlier runs.
+  actions: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -112,12 +116,10 @@ jobs:
       - name: Replication slot drill
         run: make slot-drill
 
-      # cdc-check runs dbt again on a selection, which overwrites run_results.json:
-      # the full build's results are kept apart for the reports.
+      # make dbt keeps the full build's results in data/dbt_run_results.json for
+      # the reports: later steps run dbt on selections, which overwrite run_results.json.
       - name: dbt build
-        run: |
-          make dbt
-          cp dbt/target/run_results.json data/dbt_run_results.json
+        run: make dbt
 
       - name: SQL on FHIR conformance
         run: make conformance
@@ -153,6 +155,25 @@ jobs:
       - name: Incremental CDC current state
         run: make cdc-check
 
+      # This run's quality metrics (data/quality_snapshot.json, uploaded as the
+      # quality-snapshot artifact), the history of main's runs from GitHub with
+      # this one, the dashboard, and the checks of all three.
+      - name: Data quality history and dashboard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          make dq-snapshot dq-history
+          make dashboard-up
+          make dq-check
+
+      - name: Upload quality snapshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: quality-snapshot
+          if-no-files-found: ignore
+          path: data/quality_snapshot.json
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -181,9 +202,11 @@ jobs:
             data/fhir_prior_auth.json
             data/fhir_prior_auth/
             data/cdc_reconcile.json
+            data/quality_snapshot.json
+            data/quality_check.json
             data/dbt_run_results.json
             dbt/target/run_results.json
 
       - name: Stop containers
         if: always()
-        run: docker compose --profile api down -v
+        run: docker compose --profile api --profile dashboard down -v

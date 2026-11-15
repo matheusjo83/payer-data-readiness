@@ -232,6 +232,25 @@ services:
         && airflow pools set lakehouse 1 "dbt builds, one at a time"
         && exec airflow standalone
 
+  # The data quality history (gold.quality_runs, gold.quality_history), at
+  # http://localhost:8501. Reads the lakehouse catalog and Parquet files read-only.
+  quality-dashboard:
+    profiles: [dashboard]
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    image: payer-quality-dashboard
+    container_name: payer-quality-dashboard
+    depends_on:
+      lakehouse-catalog: {condition: service_healthy}
+    environment:
+      LAKEHOUSE_CATALOG: host=lakehouse-catalog port=5432 dbname=lakehouse user=lakehouse password=lakehouse
+      LAKEHOUSE_DATA_PATH: /opt/lakehouse
+    volumes:
+      - ./data/lakehouse:/opt/lakehouse:ro
+    ports:
+      - "8501:8501"
+
 volumes:
   legacy_data:
   lakehouse_catalog:

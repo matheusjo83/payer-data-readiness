@@ -24,6 +24,32 @@ def connect() -> duckdb.DuckDBPyConnection:
             status      VARCHAR
         )
     """)
+    # The data quality history (scripts/quality_history.py collect replaces
+    # them); created here so dbt finds them before anything is collected.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bronze._quality_runs (
+            run_key          VARCHAR,
+            run_at           TIMESTAMPTZ,
+            commit           VARCHAR,
+            branch           VARCHAR,
+            scenario         VARCHAR,
+            source           VARCHAR,
+            ci_run_id        BIGINT,
+            ci_event         VARCHAR,
+            conclusion       VARCHAR,
+            duration_seconds DOUBLE,
+            metrics_from     VARCHAR
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS bronze._quality_metrics (
+            run_key   VARCHAR,
+            area      VARCHAR,
+            metric    VARCHAR,
+            dimension VARCHAR,
+            value     DOUBLE
+        )
+    """)
     return con
 
 

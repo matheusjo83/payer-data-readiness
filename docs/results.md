@@ -882,6 +882,43 @@ Both Splink models run on one thread: with several, parallel sums added up in va
 the scores differed in the 15th digit from run to run (no decision changed). On one thread, three
 consecutive builds gave identical scores (measured in Phase 7, on the linkage model).
 
+## Data quality history
+
+From `make dq-snapshot dq-history dashboard-up dq-check` on 2026-11-15, after the CI sequence run
+locally from empty servers (`make reset` to `make cdc-check`). How the history is kept is in
+[architecture.md](architecture.md#data-quality-history).
+
+- **This run's snapshot.** 339 metrics in the eight areas: load 188 (56 load steps over 46 sources,
+  all successful), FHIR 48, CDC 42 (529 changes after the prior authorization and CDC checks,
+  slowest table's p95 latency 22.0 s; 0 rows differing from Postgres), volume 21, linkage 18
+  (Splink 100% precision and 97.9% recall, 98.9% after review), data quality 14, tests 5 (283 dbt
+  tests passing, 6 warnings), performance 3.
+- **Main's history.** The 16 finished CI runs of `main` GitHub lists, from 2026-09-30 to
+  2026-11-14, rebuilt from their `reports` artifacts: 14 to 70 metrics each, as the checks were
+  added. What the series shows: the HL7 validator's warnings, 10,809 on the second run's CARIN
+  sample and 12,409 at their peak, at 0 from the cleanup run on; 0 validation errors on every run;
+  API checks from 143 (the first FHIR API run) to 462, all passing on every run; and a CI run of
+  3.3 minutes on the first run, 34.8 at its longest before the CI speed-up, 26.2 on the last. Two
+  runs (the DuckLake run and the next) have no dbt figures: their artifact kept only the results of
+  `cdc-check`'s selection, which are left out. With this run, `gold.quality_history` has 970 rows.
+- **Checks.** `make dq-check`: 43 of 43 passed (snapshot 25, history 7, gold 3, dashboard 8).
+- **Faults put in to see the checks fail**, one at a time, all passing again once removed:
+
+| Fault | Checks failed |
+|---|---:|
+| Precision recorded as the recall in the snapshot | 3 |
+| Snapshot taken without rebuilding the marts after a CDC sync | 2 |
+| Runs without a snapshot not rebuilt from their reports | 3 |
+| Warnings read as errors when rebuilding from reports | 1 |
+| Previous run ordered backwards in `gold.quality_history` | 1 |
+| Dashboard headline numbers taken from the first run | 1 |
+
+  The warnings fault first went unseen: the latest rebuilt run has no warnings, so the check now
+  compares the oldest rebuilt run too.
+- **Time.** Locally, the snapshot took 4 s, the collection 34 s (16 artifacts downloaded; a CI
+  run downloads them each time, as it keeps no cache), the dashboard image about a minute to build
+  the first time, and the check 6 s.
+
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
