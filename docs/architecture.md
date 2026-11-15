@@ -692,8 +692,10 @@ volume and how fast.
   the FHIR APIs and validation are not run: they measure conformance, not volume, and the FHIR
   models still build on the scaled legacy data.
 - **One environment per factor.** Each factor starts from an empty legacy database and lakehouse
-  (their containers, volumes and Parquet files are removed), one factor after the other on the
-  same machine, so the factors compare with each other.
+  (their containers, volumes and Parquet files are removed). Locally, `make scale` runs the factors
+  one after the other on the same machine; the workflow runs each factor in a job of its own (a
+  matrix on `ubuntu-24.04` runners, the same type, so the factors still compare), with GitHub's
+  6-hour limit each: the three factors in one job did not fit in its time limit.
 - **Steps.** Generation (legacy, PBM), the CDC initial load (replication slot and snapshot into
   DuckLake), the PBM, FHIR and terminology loads, the full dbt build, the Splink blocking
   analysis, a change batch (one simulated event per 100 members, claims and prior
@@ -737,8 +739,8 @@ volume and how fast.
   and `splink_reviewed` is left out of its snapshots.
 - **History.** Each factor's quality snapshot is taken from the lakehouse it built, with this
   run's dbt results and reconciliation and the benchmark's metrics (area `scale`), as scenario
-  `1x`, `10x` or `30x`; the run key ends with the scenario. The workflow uploads `data/scale/`
-  as the `scale-results` artifact, and the collector reads every run of the workflow (any branch:
+  `1x`, `10x` or `30x`; the run key ends with the scenario. Each job of the workflow uploads its
+  `data/scale/` as the artifact `scale-results-<factor>x` (runs before the matrix: one `scale-results`), and the collector reads every run of the workflow (any branch:
   the branch is part of the series), so the main CI adds them to `gold.quality_history`. The
   dashboard's Scale tab shows a benchmark's latest run of each factor side by side.
 - **Check** (`make scale-check`, `scripts/scale_check.py`). Per factor: every step finished, the

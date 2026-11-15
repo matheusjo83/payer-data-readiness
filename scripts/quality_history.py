@@ -15,7 +15,8 @@ and the history of those snapshots in the lakehouse.
                  artifact holds (the reports only; the lakehouse of those runs is
                  gone, so their load, CDC latency and linkage metrics are missing);
                - the runs of the scale benchmark workflow (scale.yml): one
-                 snapshot per scale factor, in their scale-results artifact;
+                 snapshot per scale factor, in their scale-results-<factor>x
+                 artifacts (one job per factor; older runs: one scale-results);
                - the local copies under data/quality_history/local/;
                - this run's data/quality_snapshot.json and the scale snapshots
                  in data/scale/ (a CI run is still going when it collects, so
@@ -454,19 +455,20 @@ def ci_record(gh: GitHub, run: dict) -> dict | None:
 
 def scale_records(gh: GitHub, run: dict) -> list[dict]:
     """The snapshots of a run of the scale benchmark, one per scale factor (the
-    scale factors it finished, if it failed on a later one)."""
+    scale factors it finished). Each factor's job uploads its own artifact,
+    scale-results-<factor>x; runs from before the matrix have one, scale-results."""
     found = artifacts(gh, run)
-    if SCALE_ARTIFACT not in found:
-        return []
-    z = zipfile.ZipFile(io.BytesIO(gh.download(found[SCALE_ARTIFACT]["id"])))
+    names = sorted(n for n in found if n == SCALE_ARTIFACT or n.startswith(f"{SCALE_ARTIFACT}-"))
     records = []
-    for name in sorted(z.namelist()):
-        if re.fullmatch(r"(?:.*/)?quality_snapshot_[^/]+\.json", name):
-            record = json.loads(z.read(name))
-            meta = run_meta(run)
-            meta["run_key"] = f"ci-{run['id']}-{record['scenario']}"
-            record.update(meta)
-            records.append(record)
+    for artifact in names:
+        z = zipfile.ZipFile(io.BytesIO(gh.download(found[artifact]["id"])))
+        for name in sorted(z.namelist()):
+            if re.fullmatch(r"(?:.*/)?quality_snapshot_[^/]+\.json", name):
+                record = json.loads(z.read(name))
+                meta = run_meta(run)
+                meta["run_key"] = f"ci-{run['id']}-{record['scenario']}"
+                record.update(meta)
+                records.append(record)
     return records
 
 

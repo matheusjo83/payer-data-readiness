@@ -229,8 +229,8 @@ current state differs from a full rebuild or from Postgres, or if the data quali
 dashboard differs from their sources. Each run uploads its quality snapshot as an artifact, which the
 next runs collect into the history. The scale benchmark has its own workflow
 ([`.github/workflows/scale.yml`](.github/workflows/scale.yml)), run by hand and on pull requests
-that change it: `make synthea scale dq-history dashboard-up scale-check`, one scale factor after
-the other on the same runner; the main CI collects its snapshots into the history.
+that change it: `make synthea scale dq-history dashboard-up scale-check`, each scale factor in a
+job of its own (up to 6 hours each); the main CI collects its snapshots into the history.
 
 Some data tests are configured as **warnings** on purpose: they flag issues that exist in the
 legacy source. The `gold.dq_issue_summary` model counts them.
