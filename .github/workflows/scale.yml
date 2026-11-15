@@ -1,0 +1,111 @@
+# Scale benchmark of the data pipeline (scripts/scale_benchmark.py): the base
+# volumes and multiples of them, one after the other on the same runner, each
+# from an empty legacy database and lakehouse. Per scale factor: the CDC initial
+# load into DuckLake, dbt build, a change batch and the incremental refresh, with
+# the time, peak memory and disk of each step, and Splink's candidate pairs per
+# blocking rule, precision and recall. Synthea and the FHIR APIs stay at the base
+# volume. Each scale factor's quality snapshot goes into the data quality
+# history (scenario 1x, 10x, 30x): the main CI collects this workflow's runs.
+#
+# Run by hand (Actions > Scale benchmark > Run workflow), and on pull requests
+# that change the benchmark. Not on every push: at 30x it takes far longer than
+# the CI.
+name: Scale benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      scales:
+        description: Scale factors, separated by spaces (1 = the base volumes)
+        default: "1 10 30"
+  pull_request:
+    paths:
+      - scripts/scale_benchmark.py
+      - scripts/scale_check.py
+      - .github/workflows/scale.yml
+
+permissions:
+  contents: read
+  # The data quality history reads the artifacts of earlier runs.
+  actions: read
+
+concurrency:
+  group: scale-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    # The same runner as the CI, so the base scale compares with it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: main
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache tool jars
+        uses: actions/cache@v6
+        with:
+          path: tools/*.jar
+          key: tools-${{ hashFiles('scripts/generate_synthea.sh', 'fhir/validate.py') }}
+
+      - name: Week
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache code system releases
+        uses: actions/cache@v6
+        with:
+          path: |
+            data/terminology/*.zip
+            data/terminology/*.modified
+          key: terminology-${{ hashFiles('ingestion/load_terminology.py') }}-${{ steps.week.outputs.week }}
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Runner
+        run: |
+          nproc
+          free -m
+          df -h .
+
+      # Synthea's base population: the benchmark does not scale it.
+      - name: Generate Synthea data
+        run: make synthea
+
+      - name: Scale benchmark
+        run: make scale SCALE="${{ inputs.scales || '1 10 30' }}"
+
+      - name: Data quality history and dashboard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          make dq-history
+          make dashboard-up
+          make scale-check
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scale-results
+          if-no-files-found: ignore
+          path: data/scale/
+
+      - name: Stop containers
+        if: always()
+        run: docker compose --profile dashboard down -v

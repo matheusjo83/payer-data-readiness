@@ -17,6 +17,12 @@ vars:
   # human review instead of being left unmatched.
   identity_auto_link_probability: 0.95
   identity_review_probability: 0.50
+  # Apply the reviewer decisions (seed identity_review_decisions). The scale
+  # benchmark turns them off: they name the IDs of the base data.
+  identity_apply_review_decisions: true
+  # Claim lines per batch of gold.fhir_explanation_of_benefit
+  # (macros/fhir_explanation_of_benefit.sql): the base data is one batch.
+  fhir_eob_batch_lines: 200000
 
 models:
   payer_data_readiness:

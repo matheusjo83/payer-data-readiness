@@ -52,7 +52,7 @@ proposed as (
 -- Decisions on a pair the model scored; a match decision wins over a no_match.
 decisions as (
     select d.cardholder_id, d.candidate_id, d.decision, d.reviewer, d.decided_at
-    from {{ ref('identity_review_decisions') }} d
+    from {{ identity_review_decisions() }} d
     join {{ ref('identity_matches_splink') }} s
         on s.cardholder_id = d.cardholder_id and s.member_id = d.candidate_id
     where d.review_type = 'member_link'

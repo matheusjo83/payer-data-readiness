@@ -62,7 +62,7 @@ scored as (
 
 decisions as (
     select cardholder_id, candidate_id as other_cardholder_id, decision, reviewer, decided_at
-    from {{ ref('identity_review_decisions') }}
+    from {{ identity_review_decisions() }}
     where review_type = 'pbm_duplicate'
 )
 

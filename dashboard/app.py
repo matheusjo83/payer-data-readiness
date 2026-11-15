@@ -31,6 +31,7 @@ def load():
 
 
 runs, history = load()
+all_history = history
 
 st.title("Data quality history")
 st.caption("Load reliability, CDC latency, FHIR conformance and linkage quality, run by run. "
@@ -126,9 +127,9 @@ def series_chart(metric, area, title, y_title, dimensions=None, total=False, fmt
     st.altair_chart(chart.properties(height=260).configure_view(stroke=None), use_container_width=True)
 
 
-load_tab, cdc_tab, fhir_tab, linkage_tab, dq_tab, perf_tab, runs_tab = st.tabs(
+load_tab, cdc_tab, fhir_tab, linkage_tab, dq_tab, perf_tab, scale_tab, runs_tab = st.tabs(
     ["Load reliability", "CDC latency", "FHIR conformance", "Linkage quality", "Data quality and tests",
-     "Performance", "Runs"])
+     "Performance", "Scale", "Runs"])
 
 with load_tab:
     c1, c2 = st.columns(2)
@@ -205,6 +206,134 @@ with perf_tab:
     with c2:
         series_chart("bulk_export_seconds", "performance", "Bulk export", "seconds",
                      dimensions=["patient-access", "payer-to-payer"], fmt=".1f")
+
+# --- Scale benchmark: the latest run of each scale factor, side by side -----------
+
+def scale_runs_of(frame, benchmark):
+    """The latest run of each scale factor of a benchmark (source · branch)."""
+    rows = frame[(frame["area"] == "scale") & (frame["benchmark"] == benchmark)]
+    latest_runs = (rows[["run_key", "scenario", "run_at"]].drop_duplicates()
+                   .sort_values("run_at").groupby("scenario").tail(1))
+    factors = rows[rows["metric"] == "scale_factor"].set_index("run_key")["value"]
+    latest_runs = latest_runs.assign(factor=latest_runs["run_key"].map(factors)).sort_values("factor")
+    return latest_runs
+
+
+def scale_chart(frame, metric, area, title, y_title, dimensions, fmt=",.0f", log=False, total_label=None):
+    """One line per dimension, across the scale factors."""
+    rows = frame[(frame["area"] == area) & (frame["metric"] == metric)]
+    if total_label:
+        rows = rows[rows["dimension"].isin(dimensions + [""])].assign(
+            dimension=lambda d: d["dimension"].replace("", total_label))
+        dimensions = dimensions + [total_label]
+    else:
+        rows = rows[rows["dimension"].isin(dimensions)]
+    rows = rows.dropna(subset=["value"])
+    if log:
+        rows = rows[rows["value"] > 0]
+    st.markdown(f"**{title}**")
+    if rows.empty:
+        st.caption("No values in this benchmark.")
+        return
+    domain = [d for d in dimensions if d in set(rows["dimension"])]
+    base = alt.Chart(rows).encode(
+        x=alt.X("scenario:O", sort=scale_order, title="scale", axis=alt.Axis(labelAngle=0, labelColor=INK,
+                                                                           titleColor=INK, domainColor=GRID,
+                                                                           tickColor=GRID)),
+        y=alt.Y("value:Q", title=y_title, scale=alt.Scale(type="log") if log else alt.Undefined,
+                axis=alt.Axis(labelColor=INK, titleColor=INK, gridColor=GRID, domain=False, ticks=False)),
+        color=alt.Color("dimension:N", title=None, sort=domain,
+                        scale=alt.Scale(domain=domain, range=PALETTE[:len(domain)]),
+                        legend=alt.Legend(orient="top", labelColor=INK, labelLimit=260)),
+        tooltip=[alt.Tooltip("scenario:N", title="Scale"), alt.Tooltip("dimension:N", title="Of"),
+                 alt.Tooltip("value:Q", title=y_title, format=fmt),
+                 alt.Tooltip("run_at:T", title="When", format="%Y-%m-%d %H:%M")],
+    )
+    chart = base.mark_line(strokeWidth=2) + base.mark_point(size=70, filled=True, opacity=1, stroke=SURFACE,
+                                                             strokeWidth=2)
+    st.altair_chart(chart.properties(height=260).configure_view(stroke=None), use_container_width=True)
+
+
+with scale_tab:
+    scaled = all_history.assign(benchmark=all_history["source"] + " · " + all_history["branch"].fillna("?"))
+    benchmarks = sorted(scaled.loc[scaled["area"] == "scale", "benchmark"].unique(),
+                        key=lambda b: (b != "ci · main", b))
+    if not benchmarks:
+        st.info("No scale benchmark yet: run `make scale` (or the Scale benchmark workflow), then `make dq-history`.")
+    else:
+        benchmark = st.selectbox("Benchmark (source · branch)", benchmarks, key="benchmark")
+        chosen = scale_runs_of(scaled, benchmark)
+        scale_order = list(chosen["scenario"])
+        frame = scaled[scaled["run_key"].isin(chosen["run_key"])]
+        st.caption("The latest run of each scale factor. Synthea and the FHIR APIs stay at the base volume; "
+                   "the linkage is the model's own decisions (no reviewer decisions at any scale).")
+
+        def at(run_key, area, metric, dimension=""):
+            r = frame[(frame["run_key"] == run_key) & (frame["area"] == area) & (frame["metric"] == metric)
+                      & (frame["dimension"] == dimension)]["value"]
+            return None if r.empty else float(r.iloc[0])
+
+        def step_max(run_key, metric):
+            r = frame[(frame["run_key"] == run_key) & (frame["area"] == "scale") & (frame["metric"] == metric)]
+            return None if r.empty else float(r["value"].max())
+
+        summary = pd.DataFrame([{
+            "scale": r.scenario,
+            "legacy members": at(r.run_key, "volume", "legacy_members"),
+            "legacy claims": at(r.run_key, "volume", "legacy_claims"),
+            "PBM cardholders": at(r.run_key, "volume", "pbm_members"),
+            "pipeline minutes": (at(r.run_key, "scale", "total_seconds") or 0) / 60,
+            "peak process memory (MB)": step_max(r.run_key, "step_peak_rss_mb"),
+            "Parquet (MB)": at(r.run_key, "scale", "disk_mb", "lakehouse_parquet"),
+            "linkage candidate pairs": at(r.run_key, "scale", "candidate_pairs", "link"),
+            "Splink precision": at(r.run_key, "linkage", "match_precision", "splink"),
+            "Splink recall": at(r.run_key, "linkage", "match_recall", "splink"),
+            "rows differing after CDC": at(r.run_key, "cdc", "reconcile_mismatched_rows"),
+            "run": r.run_key,
+        } for r in chosen.itertuples()])
+        st.dataframe(summary, hide_index=True, use_container_width=True, column_config={
+            "pipeline minutes": st.column_config.NumberColumn(format="%.1f"),
+            "Splink precision": st.column_config.NumberColumn(format="%.4f"),
+            "Splink recall": st.column_config.NumberColumn(format="%.4f")})
+
+        c1, c2 = st.columns(2)
+        with c1:
+            scale_chart(frame, "step_seconds", "scale", "Initial load: time per step", "seconds",
+                        ["seed", "pbm", "cdc_initial_load", "pbm_load", "dbt_build"], fmt=",.1f")
+        with c2:
+            scale_chart(frame, "step_seconds", "scale", "Incremental refresh: time per step", "seconds",
+                        ["change_batch", "cdc_incremental_sync", "dbt_incremental", "dbt_rebuild"], fmt=",.1f")
+        c1, c2 = st.columns(2)
+        with c1:
+            scale_chart(frame, "step_peak_rss_mb", "scale", "Peak memory of the pipeline's processes", "MB",
+                        ["cdc_initial_load", "pbm_load", "dbt_build", "dbt_incremental", "blocking_analysis",
+                         "cdc_reconcile"])
+        with c2:
+            scale_chart(frame, "disk_mb", "scale", "Size on disk", "MB",
+                        ["lakehouse_parquet", "lakehouse_catalog", "legacy_db", "legacy_wal", "pbm_feed"],
+                        fmt=",.1f")
+        link_rules = ["link:birth_date", "link:first_name_canonical+last_name", "link:last_name+zip_code",
+                      "link:first_name_canonical+zip_code"]
+        c1, c2 = st.columns(2)
+        with c1:
+            scale_chart(frame, "candidate_pairs", "scale", "Splink linkage: candidate pairs each blocking rule adds",
+                        "pairs (log)", link_rules, log=True)
+        with c2:
+            # Pairs the blocking rules produce, and those the model kept (probability 0.01 or more).
+            pairs = frame[(frame["area"] == "scale") & frame["metric"].isin(["candidate_pairs", "scored_pairs"])
+                          & frame["dimension"].isin(["link", "dedupe"])]
+            pairs = pairs.assign(metric="pairs", dimension=pairs["dimension"] + " " + pairs["metric"].map(
+                {"candidate_pairs": "candidates", "scored_pairs": "kept"}))
+            scale_chart(pairs, "pairs", "scale", "Splink: candidate pairs and pairs kept (probability ≥ 0.01)",
+                        "pairs (log)", ["link candidates", "link kept", "dedupe candidates", "dedupe kept"],
+                        log=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            scale_chart(frame, "match_precision", "linkage", "PBM to legacy linkage: precision", "precision",
+                        ["deterministic", "splink"], fmt=".4f")
+        with c2:
+            scale_chart(frame, "match_recall", "linkage", "PBM to legacy linkage: recall", "recall",
+                        ["deterministic", "splink"], fmt=".4f")
 
 with runs_tab:
     table = runs.assign(run=runs["run_key"].map(labels))[
