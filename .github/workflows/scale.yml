@@ -1,11 +1,17 @@
 # Scale benchmark of the data pipeline (scripts/scale_benchmark.py): the base
-# volumes and multiples of them, one after the other on the same runner, each
-# from an empty legacy database and lakehouse. Per scale factor: the CDC initial
-# load into DuckLake, dbt build, a change batch and the incremental refresh, with
-# the time, peak memory and disk of each step, and Splink's candidate pairs per
-# blocking rule, precision and recall. Synthea and the FHIR APIs stay at the base
-# volume. Each scale factor's quality snapshot goes into the data quality
-# history (scenario 1x, 10x, 30x): the main CI collects this workflow's runs.
+# volumes and multiples of them, each scale factor in a job of its own (a matrix,
+# on runners of the same type, ubuntu-24.04 as the CI), each from an empty legacy
+# database and lakehouse. Per scale factor: the CDC initial load into DuckLake,
+# dbt build, a change batch and the incremental refresh, with the time, peak
+# memory and disk of each step, and Splink's candidate pairs per blocking rule,
+# precision and recall. Synthea and the FHIR APIs stay at the base volume. Each
+# scale factor's quality snapshot goes into the data quality history (scenario
+# 1x, 10x, 30x), in its artifact scale-results-<factor>x: the main CI collects
+# this workflow's runs.
+#
+# One job per factor: the factors one after the other in one job did not fit in
+# its time limit (30x alone takes hours). Each job has GitHub's maximum, 6 hours,
+# and a factor that fails or times out does not stop the others.
 #
 # Run by hand (Actions > Scale benchmark > Run workflow), and on pull requests
 # that change the benchmark. Not on every push: at 30x it takes far longer than
@@ -34,10 +40,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  factors:
+    runs-on: ubuntu-24.04
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - id: list
+        env:
+          SCALES: ${{ inputs.scales || '1 10 30' }}
+        run: echo "list=$(echo "$SCALES" | jq -Rc 'split(" ") | map(select(length > 0) | tonumber)')" >> "$GITHUB_OUTPUT"
+
   benchmark:
+    needs: factors
+    name: benchmark ${{ matrix.factor }}x
+    strategy:
+      fail-fast: false
+      matrix:
+        factor: ${{ fromJSON(needs.factors.outputs.list) }}
     # The same runner as the CI, so the base scale compares with it.
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    # GitHub's maximum for a job on its runners.
+    timeout-minutes: 360
     env:
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: init.defaultBranch
@@ -88,7 +111,7 @@ jobs:
         run: make synthea
 
       - name: Scale benchmark
-        run: make scale SCALE="${{ inputs.scales || '1 10 30' }}"
+        run: make scale SCALE="${{ matrix.factor }}"
 
       - name: Data quality history and dashboard
         env:
@@ -102,7 +125,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: scale-results
+          name: scale-results-${{ matrix.factor }}x
           if-no-files-found: ignore
           path: data/scale/
 
