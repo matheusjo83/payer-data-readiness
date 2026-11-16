@@ -28,6 +28,7 @@ import sys
 import urllib.request
 import zipfile
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,8 +137,11 @@ def check_history(checks, con, snap):
         checks.check("GitHub token (CI runs of main not checked)", True, False)
         return
     gh = qh.GitHub(repo, tok)
-    listed = gh.json(f"actions/workflows/{qh.WORKFLOW}/runs?branch=main&event=push&status=completed&per_page=100")
-    expected = sorted(f"ci-{r['id']}" for r in listed["workflow_runs"])
+    # Only the runs finished before the collection listed them: one that finishes in
+    # between (another run of main ending during this one) is in the next collection.
+    listed_at = datetime.fromisoformat(qh.LISTED_AT.read_text().strip()) if qh.LISTED_AT.is_file() else None
+    expected = sorted(f"ci-{r['id']}" for r in gh.main_runs()
+                      if listed_at is None or datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00")) < listed_at)
     checks.check("every finished CI run of main", [], [k for k in expected if k not in runs])
 
     rebuilt = [k for k, r in runs.items() if r[2] == "reports"]

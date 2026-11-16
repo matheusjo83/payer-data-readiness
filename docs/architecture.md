@@ -674,7 +674,8 @@ accumulated from one run to the next. `scripts/quality_history.py` keeps them.
   color vision deficiencies, in a fixed order per metric, with darker-theme steps under a dark theme.
 - **Check** (`make dq-check`, `scripts/quality_check.py`). Computes each expected value again
   from its source: the snapshot against the reports, the marts, bronze's CDC changes and row
-  counts; the history against the snapshots on disk and the runs GitHub lists, and the latest
+  counts; the history against the snapshots on disk and the runs GitHub lists (those finished before the
+  collection listed them: a run of main that ends in between is in the next collection), and the latest
   rebuilt run against its reports artifact downloaded again; gold's previous values against the
   two latest runs of main ordered from bronze; and the dashboard, run headless in its container
   (Streamlit's AppTest), against gold's headline numbers for main's latest run and this run's.
