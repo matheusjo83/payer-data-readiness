@@ -919,6 +919,105 @@ locally from empty servers (`make reset` to `make cdc-check`). How the history i
   run downloads them each time, as it keeps no cache), the dashboard image about a minute to build
   the first time, and the check 6 s.
 
+## Scale benchmark
+
+From the `Scale benchmark` workflow, run
+[43761757360](https://github.com/matheusjo83/payer-data-readiness/actions/runs/43761757360) on
+2026-11-15 (pull request #28, the commit merged into `main` as `651f506`): `make synthea scale
+dq-history dashboard-up scale-check`, each factor in a job of its own on a GitHub `ubuntu-24.04`
+runner (4 CPUs, 15.3 to 15.6 GB of memory; DuckDB limited to about 10.7 GB and 4 threads). The
+results are the artifacts `scale-results-1x`, `-10x` and `-30x`. What scales and how each figure
+is measured are in [architecture.md](architecture.md#scale-benchmark).
+
+- **Volumes.** 1x is the legacy generator's defaults: 5,000 members, 300 providers, 25,000 claims and
+  3,000 prior authorizations; 10x and 30x multiply them (150,000 members and 750,000 claims, with
+  1.9 million claim lines, at 30x). The PBM feed followed: 3,269, 33,783 and 101,578 cardholders.
+  The change batch had 330, 3,300 and 9,900 events.
+- **Checks.** `make scale-check`: 26 of 26 passed at each factor (benchmark 20, history 2,
+  dashboard 4). At 10x and 30x two dbt tests fail, the identity quality gates (below); the check
+  expects them and no other failure.
+
+Time (seconds) and the step's peak memory (resident set of the process and its descendants):
+
+| Step | 1x | 10x | 30x |
+|---|---:|---:|---:|
+| Legacy data generated | 1.4 | 9.2 | 28.8 |
+| CDC initial load (slot and snapshot into DuckLake) | 2.2 | 2.8 | 5.5 |
+| Full dbt build | 116.6 | 803.8 | 2,786.2 |
+| — of which `terminology_code_check` | 90.2 | 761.4 | 2,658.6 |
+| — of which the two Splink models | 6.2 | 19.3 | 98.6 |
+| Change batch generated | 0.5 | 16.1 | 156.4 |
+| CDC incremental sync | 1.0 | 1.1 | 1.7 |
+| Incremental current state (`cdc-check`'s selection) | 7.5 | 8.0 | 13.1 |
+| Full rebuild after the changes | 118.0 | 809.0 | 2,729.9 |
+| Whole benchmark | 255 | 1,660 | 5,741 |
+| Peak memory of the full dbt build (MB) | 2,822 | 5,388 | 8,786 |
+| Peak memory of the incremental current state (MB) | 703 | 1,768 | 3,921 |
+| Lowest memory still available, any step (MB) | 11,930 | 10,142 | 7,700 |
+| Lakehouse Parquet (MB) | 270 | 822 | 2,038 |
+| Legacy database / its WAL (MB) | 22.5 / 32 | 151 / 192 | 437 / 512 |
+
+- **DuckLake.** The initial load and the incremental sync stay within seconds, and the
+  incremental current state grew from 7.5 to 13.1 s while the full rebuild grew from 2 minutes to
+  45; the current state equals Postgres at every factor (0 differing rows). The Parquet grows less
+  than the data (7.6 times for 30 times), since part of it is Synthea and the code releases, which
+  do not scale.
+- **The full build is the terminology check.** `terminology_code_check` takes 77% of the build at
+  1x and 95% at 10x and 30x, about 90 seconds per 25,000 claims; the rest of the build takes 26,
+  42 and 128 seconds. It is the first thing to change for a larger volume.
+- **Memory.** The build peaked at 8.8 GB at 30x, under the 10.7 GB limit, with 7.7 GB of the
+  machine still available. With DuckDB's default limit, 30x took the machine down, and
+  ExplanationOfBenefit built in one statement needed more than the limit (see architecture.md,
+  Memory and EOB in batches); its batches leave the base data's figures unchanged.
+
+Splink (blocking rules in order; each row adds the pairs the rule finds that the earlier ones
+did not):
+
+| Linkage, legacy × PBM | 1x | 10x | 30x |
+|---|---:|---:|---:|
+| Possible pairs | 16,345,000 | 1,689,150,000 | 15,236,700,000 |
+| `birth_date` | 3,393 | 84,614 | 582,863 |
+| `first_name_canonical` + `last_name` | 71,357 | 7,372,355 | 66,514,236 |
+| `last_name` + `zip_code` | 165 | 16,232 | 146,630 |
+| `first_name_canonical` + `zip_code` | 116 | 14,840 | 134,317 |
+| Candidate pairs | 75,031 | 7,488,041 | 67,378,046 |
+| Pairs kept (probability 0.01 or more) | 3,701 | 38,850 | 113,888 |
+| Splink linkage model (s) | 2.4 | 10.7 | 68.8 |
+
+| Dedupe, PBM × PBM | 1x | 10x | 30x |
+|---|---:|---:|---:|
+| Possible pairs | 5,341,546 | 570,628,653 | 5,158,994,253 |
+| Candidate pairs | 21,734 | 2,316,125 | 20,948,630 |
+| Pairs kept | 152 | 1,619 | 5,238 |
+
+- **Candidate pairs grow with the square of the volume** (100 and 898 times at 10x and 30x), like
+  the possible pairs: they stay about 0.45% of them. Nearly all come from the first name and last
+  name rule, 95% at 1x and 99% at 30x: the legacy generator draws first and last names from short fixed lists, so a name block
+  grows with the population. The pairs kept grow with the volume (31 times at 30x).
+
+Precision and recall against the ground truth, without the reviewer decisions (see
+architecture.md):
+
+| | 1x | 10x | 30x |
+|---|---:|---:|---:|
+| Deterministic: precision / recall | 99.5% / 93.4% | 99.4% / 92.8% | 99.2% / 91.4% |
+| Deterministic: linked to someone else | 14 | 166 | 694 |
+| Splink: precision / recall | 100% / 96.3% | 99.97% / 91.9% | 99.99% / 80.0% |
+| Splink: linked to someone else | 0 | 8 | 3 |
+| Splink: pairs waiting for review | 119 | 2,211 | 17,747 |
+| Dedupe: precision / recall | 100% / 69.2% | 99.5% / 62.8% | 99.8% / 63.8% |
+| Dedupe: pairs waiting for review | 56 | 476 | 1,438 |
+
+- **The identity quality gates fail at 10x and 30x.** `assert_identity_match_quality` requires
+  Splink to link no one wrongly and to reach 95% recall; `assert_identity_dedupe_quality` no wrong
+  merge. At 10x Splink linked 8 people wrongly and reached 91.9%, at 30x 3 and 80.0%, and the dedupe
+  merged wrongly at both. The pairs waiting for review grew 149 times for 30 times the people.
+  The model and its thresholds were tuned on the base data; at a larger volume they would need
+  tuning again (and a reviewer for the queue), which the benchmark measures but does not do.
+- **1x is not the CI's base run.** Its figures are taken after the change batch and without the
+  reviewer decisions; the base run of the main CI (43761959159) has Splink at 100% and 97.9%, 74
+  pairs in review, and the deterministic baseline at 99.5% and 93.4%.
+
 ## Documentation and test coverage
 
 From `make coverage`, which reads the dbt manifest (descriptions and tests) and catalog (the
