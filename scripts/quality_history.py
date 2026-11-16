@@ -66,6 +66,9 @@ SNAPSHOT = DATA / "quality_snapshot.json"
 HISTORY = DATA / "quality_history"
 LOCAL_DIR = HISTORY / "local"
 CI_DIR = HISTORY / "ci"
+# When the last collection listed main's finished runs: a run that finishes after it
+# is in the next collection, so the check expects only the runs finished before.
+LISTED_AT = HISTORY / "listed_at.txt"
 SCALE_DIR = DATA / "scale"
 WORKFLOW = "ci.yml"
 SCALE_WORKFLOW = "scale.yml"
@@ -500,7 +503,9 @@ def collect(offline: bool = False) -> list[dict]:
     repo, tok = repository(), None if offline else token()
     if repo and tok:
         gh = GitHub(repo, tok)
+        listed_at = datetime.now(timezone.utc)
         runs = gh.main_runs()
+        LISTED_AT.write_text(listed_at.isoformat() + "\n")
         new = 0
         for run in runs:
             cached = CI_DIR / f"{run['id']}.json"
